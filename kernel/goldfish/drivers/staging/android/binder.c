@@ -228,28 +228,65 @@ struct binder_node {
 	struct list_head async_todo;
 };
 
+// 用来描述一个Service组件的死亡接收通知
+// 正常情况下，Service组件被其他Client进程引用时是不可被销毁的
+// 如果Service组件意外崩溃死亡，Client进程将会收到Service组件死亡的通知
+// [当驱动要向Client发送死亡通知时，会将一个binder_ref_death结构体封装
+// 成一个工作项，根据实际情况来设置work变量的值，最后发送到Client的todo队列中]
+//
+// 死亡通知的２种情况：BINDER_WORK_DEAD_BINDER
+// 1. 驱动程序检测到了Service组件死亡：binder_node->refs [-] binder_ref_death
+// 2. Client注册死亡通知时，如果Service已经死亡
+//
+//　注销死亡通知时也会向Client进程todo队列发送一个类型为binder_ref_death的工作项
+// １．注销时Service没有死亡，驱动会找到之前注册的binder_ref_death结构体，将work修改为
+// BINDER_WORK_CLEAR_DEATH_NOTIFICATION, 然后再封装成工作项添加到Client的todo队列
+// 2. 注销时Service已经死亡，驱动会找到binder_ref_death结构体，将work修改为
+// BINDER_WORK_DEAD_BINDER_AND_CLEAR. 然后再封装成工作项添加到Client的todo队列
 struct binder_ref_death {
+	// 用来标志一个具体的死亡通知类型; 通过它也能够区分注销的结果
 	struct binder_work work;
+	// 用来保存负责接收死亡通知的对象的地址
 	void __user *cookie;
 };
 
 // 同一个Binder实体对象可能会同时被多个Client组件引用
 // 使用binder_ref来描述这些引用关系
 // 将引用了同一个Binder实体对象的所有引用都保存在一个hash列表中
+//
+// 用来描述一个Binder引用对象
+// 每个Client组件在Binder驱动中度对应有一个Binder引用对象
+// 用来描述它在内核的状态
+// 驱动通过强引用计数与弱引用计数来维护它们在生命周期
 struct binder_ref {
 	/* Lookups needed: */
 	/*   node + proc => ref (transaction) */
 	/*   desc + proc => ref (transaction, inc/dec ref) */
 	/*   node => refs + procs (proc exit) */
+	// 用来标志Binder应用对象的身份，帮助调试用
 	int debug_id;
+	// 一个宿主进程使用两个红黑树来保存它内部所有的引用对象
+	// 分别以句柄值和对应的Binder实体对象的地址作为关键字来保存Binder引用对象
+	// rb_node_desc, rb_node_node 为这两个红黑树的节点
 	struct rb_node rb_node_desc;
 	struct rb_node rb_node_node;
+	// Binder实体对象hash列表的节点
 	struct hlist_node node_entry;
+	// 引用对象的宿主进程
 	struct binder_proc *proc;
+	// 描述一个Binder引用对象所引用的Binder实体对象
 	struct binder_node *node;
+	// 句柄值描述符，用来描述一个Binder引用对象
+	// 句柄值在进程范围内唯一，不同进程见同一句柄值可能代表这不同Service组件
+	//
+	// 在Client进程的用户空间中，访问Service组件通过以下顺序
+	// Client->句柄值->binder_ref->binder_node->Service
 	uint32_t desc;
+	// 强弱引用计数，用来维护引用对象的生命周期
 	int strong;
 	int weak;
+	// 指向死亡接收通知
+	// 当Client进程向驱动注册死亡通知时，会创建一个binder_ref_death结构体并保存在death变量中
 	struct binder_ref_death *death;
 };
 
@@ -2900,7 +2937,7 @@ static int binder_release(struct inode *nodp, struct file *filp)
 	}
 
 	binder_defer_work(proc, BINDER_DEFERRED_RELEASE);
-	
+
 	return 0;
 }
 
@@ -3043,7 +3080,7 @@ static void binder_deferred_func(struct work_struct *work)
 
 		if (defer & BINDER_DEFERRED_RELEASE)
 			binder_deferred_release(proc); /* frees proc */
-	
+
 		mutex_unlock(&binder_lock);
 		if (files)
 			put_files_struct(files);
