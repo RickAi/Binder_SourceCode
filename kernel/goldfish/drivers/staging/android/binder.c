@@ -159,7 +159,9 @@ static struct binder_transaction_log_entry *binder_transaction_log_add(
 	return e;
 }
 
+// 用来描述待处理的工作项，这些工作项可能属于一个进程或者线程。
 struct binder_work {
+	// entry: 	用来将该结构体嵌入到一个宿主结构中
 	struct list_head entry;
 	enum {
 		BINDER_WORK_TRANSACTION = 1,
@@ -168,30 +170,61 @@ struct binder_work {
 		BINDER_WORK_DEAD_BINDER,
 		BINDER_WORK_DEAD_BINDER_AND_CLEAR,
 		BINDER_WORK_CLEAR_DEATH_NOTIFICATION,
+	// type:	用来描述工作项的类型
+	// 根据type值, 可以判断出binder_work结构体嵌入到了什么类型的宿主结构
 	} type;
 };
 
+// 用来描述一个Binder实体对象
+// 每一个Service组件在Binder驱动程序中都对应着一个Binder实体对象, 用来描述它在内核中的状态
+// Binder驱动程序通过强引用计数和弱引用计数来维护它们的生命周期
 struct binder_node {
+	// debug_id: 来用标志一个Binder实体对象的身体，用来调试用的
 	int debug_id;
+	// 当一个Binder实体对象的引用计数0->1或者1->0时，Binder驱动程序会请求相应的Service增加或
+	// 减少其引用计数; 这时，Binder驱动会将该引用计数修改操作封装成binder_node的工作项，work变量
+	// 的值将被设为BINDER_WORK_NODE并添加到相应的todo队列中等待处理
 	struct binder_work work;
 	union {
+		// rb_node:		红黑树中的一个节点
 		struct rb_node rb_node;
+		// dead_node:	如果宿主进程已经死亡，dead_node将被保存在一个全局hash列表中
 		struct hlist_node dead_node;
 	};
+	// proc:		指向一个Binder实体对象的宿主进程
+	// [这些宿主进程通过一个binder_proc结构体来描述，宿主进程使用一个红黑树来维护它内部所有的Binder实体对象]
 	struct binder_proc *proc;
+	// refs:		binder_ref hash列表，通过这个变量可以知道哪些Client组件引用了同一个Binder实体对象
 	struct hlist_head refs;
+	// internal_strong_refs/local_strong_refs: Binder实体对象强引用计数
 	int internal_strong_refs;
+	// local_weak_refs: 弱引用计数
 	int local_weak_refs;
 	int local_strong_refs;
+	// ptr：			指向用户空间中的Service组件内部的引用计数对象的地址
 	void __user *ptr;
+	// cookie: 		指向用户空间中的Service组件地址
 	void __user *cookie;
 	unsigned has_strong_ref : 1;
+	// pending_strong_ref/pending_weak_ref: 正在增加或减少引用计数会被设置为1
 	unsigned pending_strong_ref : 1;
+	// has_strong_ref/has_weak_ref: 当Binder实体对象请求Service组件执行操作时会被设置为1
 	unsigned has_weak_ref : 1;
 	unsigned pending_weak_ref : 1;
+	// has_async_transaction: 是否在执行异步事务
+	// [Binder驱动程序会将事务保存在一个线程的todo队列中，表示要由该线程来处理的事务，每一个事务都关联着一个
+	// Binder实体对象，表示该事务的目标处理对象，即要求与该Binder实体对象对应的Service组件在指定的线程中处理该事务，
+	// 当Binder驱动发现一个事务是异步的，就会将它保存在目标Bindr实体对象的一个异步事务队列中]
 	unsigned has_async_transaction : 1;
+	// accept_fds：	用来描述一个Binder实体对象是否可以接受包含有文件描述符的进程间通信数据
+	// [如果允许，当一个进程向另一个进程发送数据中含有文件描述符时，Binder驱动会自动在目标进程中打开一个相同文件]
 	unsigned accept_fds : 1;
+	// min_priority： Binder实体对象在处理一个来自Client进程的请求时，它的对应Server进程中的进程应该具备的最小线程优先级
+	// 这样能保证该Binder实体对象对应的Service组件在一个有一定优先级的线程中处理来自Client进程的请求
 	int min_priority : 8;
+	// async_todo:	异步事务队列; 即单向的进程间通信请求，不需要等待应答
+	// [异步事务的优先级低于同步事务，同一时刻，一个Binder实体对象的所有异步事务至多只有一个会得到处理
+	// 同步事务没有这个限制]
 	struct list_head async_todo;
 };
 
@@ -200,6 +233,9 @@ struct binder_ref_death {
 	void __user *cookie;
 };
 
+// 同一个Binder实体对象可能会同时被多个Client组件引用
+// 使用binder_ref来描述这些引用关系
+// 将引用了同一个Binder实体对象的所有引用都保存在一个hash列表中
 struct binder_ref {
 	/* Lookups needed: */
 	/*   node + proc => ref (transaction) */
