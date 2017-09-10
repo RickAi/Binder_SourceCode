@@ -403,7 +403,7 @@ struct binder_proc {
 	// 保存在空闲的红黑树中
 	struct rb_root free_buffers;
 	// 列表中的小块内核缓冲区有的是正在使用的，即已经分配了物理页面
-	// 有的是空闲的，即还没有分配物理页面，分别组织在两个红黑树中国
+	// 有的是空闲的，即还没有分配物理页面，分别组织在两个红黑树中
 	// 保存在已经分配的红黑树中
 	struct rb_root allocated_buffers;
 	// 保存了当前可以用来保存异步事务数据的内核缓冲区的大小
@@ -441,48 +441,96 @@ struct binder_proc {
 	long default_priority;
 };
 
+// 线程的状态
 enum {
+	// 一个线程注册到Binder程序后，就会通过BC_REGISTER_LOOPER或者BC_ENTER_LOOPER协议来通知驱动
+	// 它可以处理进程间通信的请求了
+	// 这时Binder驱动程序就会将它的状态设置为以下两个状态
+	// 如果一个线程时应用程序主动注册的，那么它就会通过BC_ENTER_LOOPER协议来通知Binder驱动
+	// 如果一个线程是Binder驱动请求创建的，那么就会通过BC_REGISTER_LOOPER协议来通知Binder驱动
 	BINDER_LOOPER_STATE_REGISTERED  = 0x01,
 	BINDER_LOOPER_STATE_ENTERED     = 0x02,
+	// 当Binder线程退出时，会通过设置成以下状态
 	BINDER_LOOPER_STATE_EXITED      = 0x04,
+	// 当出现异常时会设置成以下状态
 	BINDER_LOOPER_STATE_INVALID     = 0x08,
+	// 当Bindre线程处于空闲状态时，驱动会把它的状态设置为以下
 	BINDER_LOOPER_STATE_WAITING     = 0x10,
+	// 一个线程注册到Binder驱动程序时，Binder驱动程序就会为它创建一个binder_thread结构体，
+	// 并且将它的状态初始化为BINDER_LOOPER_STATE_NEED_RETURN
+	// 表示该线程需要马上返回到用户空间
+	// 由于一个线程在注册为Binder线程时可能还没有准备好去处理进程间通信的请求
+	// 因此，最好返回到用户空间去做准备工作
+	// 此外，当进程调用函数flush刷新Binder线程池时,Binder线程池中的线程状态也会被重置为BINDER_LOOPER_STATE_NEED_RETURN
 	BINDER_LOOPER_STATE_NEED_RETURN = 0x20
 };
 
+// 用来描述Binder线程池中的一个线程
 struct binder_thread {
+	// 指向宿主进程，binder_proc使用一个红黑树来组织其Binder线程池中的线程
 	struct binder_proc *proc;
+	// binder_proc红黑树的节点
 	struct rb_node rb_node;
+	// 线程id
 	int pid;
+	// 线程状态
 	int looper;
+	// 当驱动准备将事务交给一个Binder线程处理时，它就会把该事务封装成一个binder_transaction结构体
+	// 把它添加到事务堆栈中
 	struct binder_transaction *transaction_stack;
+	// 当一个来自client进程的请求指定要由某个Binder线程处理时，这个请求就会加入到相应的todo队列中
+	// 并且唤醒这个线程
 	struct list_head todo;
+	// 一个Binder线程如果出现了异常情况，那么驱动会将相应的错误码保存在return_error和return_error2中
 	uint32_t return_error; /* Write failed, return error code in read buf */
 	uint32_t return_error2; /* Write failed, return error code in read */
 		/* buffer. Used when sending a reply to a dead process that */
 		/* we are also waiting on */
+	// 当一个Binder线程在处理一个事务T1并需要依赖于其他的Binder来处理另外一个事务T2时，
+	// 它就会睡眠在由成员变量wait所描述的一个等待队列中，直到T2处理完成
 	wait_queue_head_t wait;
+	// 用来统计Binder线程数据
 	struct binder_stats stats;
 };
 
 // 用来描述一个事务，每个事务都关联着一个目标Binder实体对象
 // 事务数据->缓冲区->实体对象->Service组件
+// 
+// 用来描述进程间通信过程，又称事务
 struct binder_transaction {
+	// 用来标志一个事务结构体身份，调试Binder驱动用的
 	int debug_id;
+	// 当Binder驱动为目标进程或者目标线程创建了一个事务时，就会将该事务的成员变量work值
+	// 设置为BINDER_WORK_TRANSACTION
+	// 将它添加到目标进程或者目标线程的todo队列中去等待处理
 	struct binder_work work;
+	// 发起事务的线程，又称源线程
 	struct binder_thread *from;
+	// 一个事务所依赖的另外一个事务
 	struct binder_transaction *from_parent;
+	// 负责处理该事务的进程和线程，又称目标进程、目标线程
 	struct binder_proc *to_proc;
 	struct binder_thread *to_thread;
+	// 下一个需要处理的事务
+	// [一个场景：
+	// A<T1> -> C<T3> -> A ]
 	struct binder_transaction *to_parent;
+	// 区分是同步还是异步
 	unsigned need_reply : 1;
 	/*unsigned is_dead : 1;*/ /* not used at the moment */
-
+	// 驱动为事务分配的一块内核缓冲区
+	// 里面保存着进程间的通信数据
 	struct binder_buffer *buffer;
+	// 从进程间通信数据中拷贝过来的
 	unsigned int	code;
 	unsigned int	flags;
+	// 源线程的优先级
 	long	priority;
+	// 一个线程在处理一个事务时，Binder驱动需要修改它的线程优先级，以便满足院系那成和目标Service组件的要求
+	// Binder驱动在修改一个线程的优先级之前，会将它的线程优先级保存在一个事务结构体的成员变量saved_priority中
+	// 以便线程处理完成该事务后可以恢复原来的优先级
 	long	saved_priority;
+	// 源线程的id
 	uid_t	sender_euid;
 };
 
