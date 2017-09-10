@@ -691,16 +691,27 @@ static void binder_set_nice(long nice)
 	binder_user_error("binder: %d RLIMIT_NICE not set\n", current->pid);
 }
 
+// 计算一个内核缓冲区binder_buffer的大小时，需要考虑它在进程内核缓冲区列表buffers中的位置
 static size_t binder_buffer_size(
 	struct binder_proc *proc, struct binder_buffer *buffer)
 {
 	if (list_is_last(&buffer->entry, &proc->buffers))
+		// 如果是列表中的最后一个元素
+		// 那么描述的内核缓冲区的有效数据块成员变量data开始
+		// 一直到Binder驱动程序为进程所分配的一块连续内核地址空间的末尾
+		// 因此，计算Binder驱动为进程proc分配的内核地址空间的末尾地址
+		// 然后再减去内核缓冲区buffer的成员变量data的地址
+		// 最后得到内核缓冲区buffer的有效数据块的大小
 		return proc->buffer + proc->buffer_size - (void *)buffer->data;
 	else
+		// 如果不是最后一个元素
+		// 那么大小等于下一个内核缓冲区的起始地址，再减去它的成员变量data的地址
 		return (size_t)list_entry(buffer->entry.next,
 			struct binder_buffer, entry) - (size_t)buffer->data;
 }
 
+// 将一个空间的内核缓冲区加入到进程的空闲内核缓冲区红黑树中
+// new_buffer; 将被加入到目标进程proc的空闲内缓冲区红黑树中
 static void binder_insert_free_buffer(
 	struct binder_proc *proc, struct binder_buffer *new_buffer)
 {
@@ -712,6 +723,7 @@ static void binder_insert_free_buffer(
 
 	BUG_ON(!new_buffer->free);
 
+	// 计算new_buffer的大小
 	new_buffer_size = binder_buffer_size(proc, new_buffer);
 
 	if (binder_debug_mask & BINDER_DEBUG_BUFFER_ALLOC)
@@ -730,8 +742,24 @@ static void binder_insert_free_buffer(
 		else
 			p = &parent->rb_right;
 	}
+	// 调用函数rb_link_node和rb_insert_color将内核缓冲区new_buffer保存在这个位置上
+	// 这样就相当于将内核缓冲区new_buffer插入到目标进程proc的空闲内核缓冲区红黑树free_buffers中
 	rb_link_node(&new_buffer->rb_node, parent, p);
 	rb_insert_color(&new_buffer->rb_node, &proc->free_buffers);
+	// 一个使用Binder进程间通信机制的进程只有将Binder设备文件银蛇到自己的地址空间
+	// Binder才能够为它分配内核缓冲区，以便可以用来传输进程间的数据
+	// Binder驱动程序为进程分配的内核缓冲区有两个地址
+	// 一个是用户空间地址
+	// 另一个是内核空间地址
+	// 它们有线程的对应关系
+	// 
+	// Binder驱动为进程分配的内核缓冲区为一系列物理页面
+	// 它们分别被映射到进程的用户地址空间和内核地址空间
+	// 当Binder驱动需要将一块数据传输给一个进程时
+	// 它就可以先把这块数据保存在为该进程分配的一块内核缓冲区中
+	// 然后再把这块内核缓冲区的用户空间地址告诉进程
+	// 最后进程就可以访问里面的数据了
+	// 这样做的好处就是不需要将内核空间拷贝到用户空间，从而提高了数据的传输效率
 }
 
 static void binder_insert_allocated_buffer(
@@ -783,6 +811,11 @@ static struct binder_buffer *binder_buffer_lookup(
 	return NULL;
 }
 
+// 为一段指定的虚拟地址空间分配或者释放物理界面
+// proc: 要操作的目标进程
+// allocate: 如果等于0，表示要释放物理页面，否则要分配物理页面
+// start/end: 指定了要操作的内核地址空间的开始和结束地址
+// vma: 指向要映射的用户地址空间
 static int binder_update_page_range(struct binder_proc *proc, int allocate,
 	void *start, void *end, struct vm_area_struct *vma)
 {
@@ -799,6 +832,8 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 	if (end <= start)
 		return 0;
 
+	// 判断vma是否指向一个空的用户地址空间
+	// 如果是，就从目标进程proc成员变量获得要映射的地址空间
 	if (vma)
 		mm = NULL;
 	else
@@ -809,6 +844,7 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 		vma = proc->vma;
 	}
 
+	// 判断是要为内核地址空间start~end分配物理页面还是释放物理页面
 	if (allocate == 0)
 		goto free_range;
 
@@ -818,19 +854,27 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 		goto err_no_vma;
 	}
 
+	// 内核地址空间start~end可能包含了多个页面
+	// 使用for循环一次为每一个虚拟地址空间页面分配一个物理页面
 	for (page_addr = start; page_addr < end; page_addr += PAGE_SIZE) {
 		int ret;
 		struct page **page_array_ptr;
+		// 首先从目标进程proc的物理页面结构体指针数组pages中获得一个与内核地址空间page_addr~(page_addr+PAGE_SIZE)对应的物理页面指针
 		page = &proc->pages[(page_addr - proc->buffer) / PAGE_SIZE];
 
 		BUG_ON(*page);
+		// 调用alloc_page为该内核地址空间分配一个物理页面
 		*page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 		if (*page == NULL) {
 			printk(KERN_ERR "binder: %d: binder_alloc_buf failed "
 			       "for page at %p\n", proc->pid, page_addr);
 			goto err_alloc_page_failed;
 		}
+		// 分配成功后，分别映射到对应的内核地址空间和用户地址空间
+		//
+		// 映射内核地址空间
 		tmp_area.addr = page_addr;
+		// 8K用来检测非法指针
 		tmp_area.size = PAGE_SIZE + PAGE_SIZE /* guard page? */;
 		page_array_ptr = page;
 		ret = map_vm_area(&tmp_area, PAGE_KERNEL, &page_array_ptr);
@@ -840,6 +884,7 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 			       proc->pid, page_addr);
 			goto err_map_kernel_failed;
 		}
+		// 映射用户地址空间
 		user_page_addr =
 			(uintptr_t)page_addr + proc->user_buffer_offset;
 		ret = vm_insert_page(vma, user_page_addr, page[0]);
@@ -858,15 +903,21 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 	return 0;
 
 free_range:
+	// 物理页面的释放过程
+	// start~end包含了多个页面，使用for循环来为每一个虚拟地址空间页面释放物理页面
 	for (page_addr = end - PAGE_SIZE; page_addr >= start;
-	     page_addr -= PAGE_SIZE) {
+	    page_addr -= PAGE_SIZE) {
+		// 先从目标进程proc的物理页面结构体指针数据pages中获得一个
+		// 与内核地址空间page_addr~(page_addr+PAGE_SIZE)对应的物理页面指针
 		page = &proc->pages[(page_addr - proc->buffer) / PAGE_SIZE];
 		if (vma)
+			// 调用zap_page_range和unmap_kernel_rage来接触该物理页面在用户地址空间和内核地址空间的映射
 			zap_page_range(vma, (uintptr_t)page_addr +
 				proc->user_buffer_offset, PAGE_SIZE, NULL);
 err_vm_insert_page_failed:
 		unmap_kernel_range((unsigned long)page_addr, PAGE_SIZE);
 err_map_kernel_failed:
+		// 用来释放该物理页面
 		__free_page(*page);
 		*page = NULL;
 err_alloc_page_failed:
@@ -2921,14 +2972,36 @@ static struct vm_operations_struct binder_vm_ops = {
 	.close = binder_vma_close,
 };
 
+// 打开设备文件/dev/binder之后，还需要调用函数mmap把设备文件映射到进程的地址空间
+// 然后才可以使用Binder进程间通信机制
+// 设备文件对应的是一个虚拟设备，将它映射到进程的地址空间的目的不是对它的内容感兴趣
+// 而是为了为进程分配内核缓冲区，以便他可以用来传输进程间的通信数据
+//
+// filp: 指向一个打开的文件结构体，它的成员变量private_data指向一个进程结构体binder_proc
+// 它是在Binder驱动的binder_open中创建的
 static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	int ret;
+	// 用来描述一段虚拟地址空间
+	// 在Linux内核中，一个进程可以占用的虚拟地址空间是4G
+	// 其中0-3G是用户地址空间，3G-4G是内核地址空间
+	// 为了区分进程的用户地址空间和内核地址空间
+	// Linux内核分别使用结构体vm_area_struct和vm_struct来描述它们
+	// 结构体vm_struct所描述的内核地址空间范围只有(3G+896M+8M)-4G
+	// 中间空出来的3G-(3G+896M+8M)是用来做特殊用途的
+	// 其中，3G-(3G+896M)的896M空间是用来映射物理内存的前896M的
+	// 它们之间有简单的线性对应关系
+	// 而(3G+896M)-(3G+896M+8M)的8M空间是一个安全保护区，是用来检测非法指针的，所有指向这8M空间的指针都是非法的
 	struct vm_struct *area;
+	// 将参数filp的成员变量private_data转换为一个binder_proc结构体指针，保存在proc变量中
 	struct binder_proc *proc = filp->private_data;
 	const char *failure_string;
 	struct binder_buffer *buffer;
 
+	// 参数的成员变量vm_start和vm_end指定了要映射的用户空间地址范围
+	// 判断是否超过了4M
+	// 如果是,那么就将它截断为4M
+	// Binder驱动最多为进程分配4M的内核缓冲区来传输数据
 	if ((vma->vm_end - vma->vm_start) > SZ_4M)
 		vma->vm_end = vma->vm_start + SZ_4M;
 
@@ -2939,19 +3012,27 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 			(vma->vm_end - vma->vm_start) / SZ_1K, vma->vm_flags,
 			(unsigned long)pgprot_val(vma->vm_page_prot));
 
+	// 检查进程要映射的用户地址空间是否可写
+	// FORBIDDEN_MMAP_FLAGS是一个宏
+	// Binder驱动为进程分配的内核缓冲区在用户空间只可以读不可以写
 	if (vma->vm_flags & FORBIDDEN_MMAP_FLAGS) {
 		ret = -EPERM;
 		failure_string = "bad vm_flags";
 		goto err_bad_arg;
 	}
+	// 同时也禁止拷贝
 	vma->vm_flags = (vma->vm_flags | VM_DONTCOPY) & ~VM_MAYWRITE;
 
+	// 是否重复调用函数mmap来映射/dev/binder
+	// 如何proc->buffer已经指向了一块内核缓冲区就会出错返回
 	if (proc->buffer) {
 		ret = -EBUSY;
 		failure_string = "already mapped";
 		goto err_already_mapped;
 	}
 
+	// 在进程的内核地址空间分配一段大小为4M的空间
+	// 如果分配成功就将它的起始地址以及大小保存在proc->buffer和proc->buffer_size中
 	area = get_vm_area(vma->vm_end - vma->vm_start, VM_IOREMAP);
 	if (area == NULL) {
 		ret = -ENOMEM;
@@ -2959,6 +3040,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 		goto err_get_vm_area_failed;
 	}
 	proc->buffer = area->addr;
+	// 计算要映射的用户空间起始地址与前面获得的内核空间起始地址的差值
 	proc->user_buffer_offset = vma->vm_start - (uintptr_t)proc->buffer;
 
 #ifdef CONFIG_CPU_CACHE_VIPT
@@ -2969,6 +3051,11 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 		}
 	}
 #endif
+	// 接下来为进程要映射的虚拟地址空间vma和area分配物理页面
+	// 分配内核缓冲区
+	// 创建一个物理页面结构体指针数组
+	// 每一页虚拟地址空间都对应有一个物理页面
+	// PAGE_SIZE一般定义为4K
 	proc->pages = kzalloc(sizeof(proc->pages[0]) * ((vma->vm_end - vma->vm_start) / PAGE_SIZE), GFP_KERNEL);
 	if (proc->pages == NULL) {
 		ret = -ENOMEM;
@@ -2977,19 +3064,24 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 	}
 	proc->buffer_size = vma->vm_end - vma->vm_start;
 
+	// 指定它的打开和关闭函数为binder_vma_open和binder_vma_close
 	vma->vm_ops = &binder_vm_ops;
 	vma->vm_private_data = proc;
-
+	// 为虚拟地址空间area分配一个物理页面，对应的内核地址空间为proc->buffer~(proc->buffer + PAGE_SIZE)
 	if (binder_update_page_range(proc, 1, proc->buffer, proc->buffer + PAGE_SIZE, vma)) {
 		ret = -ENOMEM;
 		failure_string = "alloc small buf";
 		goto err_alloc_small_buf_failed;
 	}
+	// 调用成功后，就使用一个binder_buffer结构体来描述它，并且将它加入到进程结构体proc中的内核缓冲区列表buffers中
 	buffer = proc->buffer;
 	INIT_LIST_HEAD(&proc->buffers);
 	list_add(&buffer->entry, &proc->buffers);
 	buffer->free = 1;
+	// 调用函数将它加入到进程结构体proc的空闲内核缓冲区红黑树free_buffers中
 	binder_insert_free_buffer(proc, buffer);
+	// 分配线程最大用于异步事务的内核缓冲区大小为内核缓冲区的一般
+	// 防止异步事务消耗过多的内核缓冲区，从而影响同步事务的执行
 	proc->free_async_space = proc->buffer_size / 2;
 	barrier();
 	proc->files = get_files_struct(current);
@@ -3011,6 +3103,8 @@ err_bad_arg:
 	return ret;
 }
 
+// 在使用Binder进程通信机制之前，首先要调用函数open打开设备文件/dev/binder来获得一个文件描述符
+// 通过这个文件描述符才能和Binder驱动程序交互，继而和其他进程执行Binder进程间通信
 static int binder_open(struct inode *nodp, struct file *filp)
 {
 	struct binder_proc *proc;
@@ -3018,22 +3112,40 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	if (binder_debug_mask & BINDER_DEBUG_OPEN_CLOSE)
 		printk(KERN_INFO "binder_open: %d:%d\n", current->group_leader->pid, current->pid);
 
+	// 为进程创建一个binder_proc结构体
+	// 进行初始化
 	proc = kzalloc(sizeof(*proc), GFP_KERNEL);
 	if (proc == NULL)
 		return -ENOMEM;
 	get_task_struct(current);
+	// 任务控制块
 	proc->tsk = current;
 	INIT_LIST_HEAD(&proc->todo);
 	init_waitqueue_head(&proc->wait);
+	// 进程优先级
 	proc->default_priority = task_nice(current);
 	mutex_lock(&binder_lock);
 	binder_stats.obj_created[BINDER_STAT_PROC]++;
+	// 将结构体proc加入到全局hash队列binder_procs中
+	// 驱动将所有打开了设备文件/dev/binder的进程都加入到全局hash队列binder_procs中
+	// 通过这个hash队列可以知道系统当前有多少个进程在使用Binder进程间通信机制
 	hlist_add_head(&proc->proc_node, &binder_procs);
+	// 进程组ID
 	proc->pid = current->group_leader->pid;
 	INIT_LIST_HEAD(&proc->delivered_death);
+	// 将初始化完成之后的binder_proc结构体proc保存在参数filp成员变量的private_data中
+	// 参数filp指向一个打开文件结构体
+	// 当进程调用函数open打开设备文件/dev/binder之后，内核就会返回一个文件描述符给进程
+	// 这个文件描述符与参数filp所指向的打开文件结构体是关联在一起的
+	// 当进程后面以这个文件描述符为参数调用函数mmap或者ioctl来与binder驱动交互时
+	// 内核就会将与该文件描述符相关联的打开文件结构体传递给Binder驱动程序
+	// 这时驱动可以通过它的成员变量private_data来获得前面在函数binder_open中为进程创建的binder_proc结构体proc
 	filp->private_data = proc;
 	mutex_unlock(&binder_lock);
 
+	// 创建一个以进程ID为名称的只读文件
+	// 以函数binder_read_proc_proc作为它的文件内容读取函数
+	// 通过读取文件/proc/binder/proc/<PID>的内容，可以获取该进程的Binder线程池、实体对象、引用对象、内核缓冲区等信息
 	if (binder_proc_dir_entry_proc) {
 		char strbuf[11];
 		snprintf(strbuf, sizeof(strbuf), "%u", proc->pid);
@@ -3796,11 +3908,15 @@ static int binder_read_proc_transaction_log(
 	return len < count ? len  : count;
 }
 
+// 设备文件的操作方法列表
 static struct file_operations binder_fops = {
 	.owner = THIS_MODULE,
 	.poll = binder_poll,
+	// IO控制函数
 	.unlocked_ioctl = binder_ioctl,
+	// 内存映射
 	.mmap = binder_mmap,
+	// 打开
 	.open = binder_open,
 	.flush = binder_flush,
 	.release = binder_release,
@@ -3816,10 +3932,18 @@ static int __init binder_init(void)
 {
 	int ret;
 
+	// 在目标设备上创建一个/proc/binder/proc的目录
+	// 每一个使用了Binder进程间通信机制的进程在该目录下都对应有一个文件，这些文件以进程ID来命名，通过它们
+	// 可以读取到各个进程的Binder线程池、Binder实体对象、Binder引用对象以及内核缓冲区等信息
 	binder_proc_dir_entry_root = proc_mkdir("binder", NULL);
 	if (binder_proc_dir_entry_root)
 		binder_proc_dir_entry_proc = proc_mkdir("proc", binder_proc_dir_entry_root);
+	// 创建一个Binder设备
+	// 创建一个misc类型的字符设备
 	ret = misc_register(&binder_miscdev);
+	// 创建/proc/binder目录下创建五个文件
+	// 读取这五个文件可以读取Binder驱动程序的运行状况
+	// 例如，BC,BR的请求次数、日志记录信息、正在执行进程间通信过程的进程信息等等
 	if (binder_proc_dir_entry_root) {
 		create_proc_read_entry("state", S_IRUGO, binder_proc_dir_entry_root, binder_read_proc_state, NULL);
 		create_proc_read_entry("stats", S_IRUGO, binder_proc_dir_entry_root, binder_read_proc_stats, NULL);
