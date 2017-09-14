@@ -41,6 +41,18 @@ import java.lang.reflect.Modifier;
  * 
  * @see IBinder
  */
+
+// Client进程和Server进程一次通信过程中，涉及了四种类型对象
+// Binder实体对象 -> binder_node
+// Binder引用对象 -> binder_ref
+// Binder本地对象 -> BBinder
+// Binder代理对象 -> BpBinder
+//
+// 1. Client调用BpBinder向驱动发送请求，驱动通过代理对象获取句柄值
+// 2. 驱动根据引用对象找到对应的实体对象，并创建一个事务来描述该次通信过程
+// 3. 驱动根据实体对象找到运行在Server进程中的Binder本地对象，并且将Client进程传递过来的通信数据进行处理
+// 4. Binder本地对象处理完Client进程的请求后，就将通信结果返回给驱动，驱动会找到前面创建的事务
+// 5. 驱动根据前面找到的事务相关属性找到发送请求的Client进程，并且通知Client进程将通信结果返回给对应的Binder代理对象处理
 public class Binder implements IBinder {
     /*
      * Set this flag to true to detect anonymous, local or member classes

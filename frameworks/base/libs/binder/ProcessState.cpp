@@ -360,6 +360,11 @@ static int open_driver()
     return fd;
 }
 
+// 第一次调用ProcessState的静态成员self时，Binder库会为进程创建一个ProcessState对象
+// 并且调用函数open来打开设备文件/binder/dev
+// 接着调用函数mmap将它映射到进程的地址空间，即请求Binder驱动程序为进程分配内核缓冲区
+// 设备文件/dev/binder映射到进程的地址空间后
+// 得到的内核缓冲区的用户地址就保存在其成员变量mVMStart中
 ProcessState::ProcessState()
     : mDriverFD(open_driver())
     , mVMStart(MAP_FAILED)

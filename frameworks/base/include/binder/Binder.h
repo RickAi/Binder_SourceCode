@@ -22,6 +22,10 @@
 // ---------------------------------------------------------------------------
 namespace android {
 
+// 在用户空间中创建
+// 运行在Server进程
+// 会被运行在Server进程中的其它对象引用，也会被驱动中的Binder实体对象引用
+// Binder实体对象运行在内核空间，不能铜鼓只能指针来引用运行在用户空间的Binder本地对象
 class BBinder : public IBinder
 {
 public:
@@ -32,6 +36,8 @@ public:
     virtual status_t    pingBinder();
     virtual status_t    dump(int fd, const Vector<String16>& args);
 
+    // 当一个Binder代理对象通过Binder驱动程序向一个Binder本地对象发出一个进程间通信请求时
+    // Binder驱动会调用Binder本地对象的成员函数transact来处理该请求
     virtual status_t    transact(   uint32_t code,
                                     const Parcel& data,
                                     Parcel* reply,
@@ -58,6 +64,7 @@ public:
 protected:
     virtual             ~BBinder();
 
+    // 负责分发与业务相关的进程间通信请求
     virtual status_t    onTransact( uint32_t code,
                                     const Parcel& data,
                                     Parcel* reply,
@@ -75,6 +82,8 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// RefBase: 可以通过强指针，弱指针来维护它们的生命周期
+// 提供了抽象的进程间通信接口
 class BpRefBase : public virtual RefBase
 {
 protected:

@@ -37,6 +37,7 @@ class IPCThreadState;
 class ProcessState : public virtual RefBase
 {
 public:
+    // 静态对象可以通过self函数来获取
     static  sp<ProcessState>    self();
 
     static  void                setSingleProcess(bool singleProcess);

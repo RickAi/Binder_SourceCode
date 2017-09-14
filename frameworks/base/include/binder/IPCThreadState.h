@@ -29,6 +29,13 @@ typedef  int  uid_t;
 // ---------------------------------------------------------------------------
 namespace android {
 
+// 每一个使用了Binder进程间通信机制的进程都有一个Binder线程池，用来处理进程间通信请求
+// 对于每一个Binder线程来说，它的内部都有一个IPCThread对象
+// 可以通过IPCThreadState类的静态成员函数self来获取，并且调用它的成员函数transact来和
+// Binder驱动交互
+// 在IPCThreadState类的成员函数transact内部，与Binder驱动的交互又是通过调用talkWithDriver
+// 来实现
+// 一方面负责向Binder驱动发送进程间通信请求，另一方面又负责接受来自Binder驱动程序的进程间通信请求
 class IPCThreadState
 {
 public:
@@ -104,7 +111,10 @@ private:
                                            const uint8_t* data, size_t dataSize,
                                            const size_t* objects, size_t objectsSize,
                                            void* cookie);
-    
+    // 指向一个ProcessState对象，负责初始化Binder设备
+    // 打开设备文件/dev/binder，以及将设备文件/dev/binder映射到进程的地址空间
+    // 由于这个ProcessState对象在进程范围内是唯一的
+    // 因此，Binder线程池中的每一个线程都可以通过它来和Binder驱动程序建立连接
     const   sp<ProcessState>    mProcess;
     const   pid_t               mMyThreadId;
             Vector<BBinder*>    mPendingStrongDerefs;

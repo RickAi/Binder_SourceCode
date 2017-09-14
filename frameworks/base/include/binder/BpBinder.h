@@ -24,11 +24,13 @@
 // ---------------------------------------------------------------------------
 namespace android {
 
+// BBinder和BpBinder类都是通过IPCThreadState类来和Binder驱动进行交互的
 class BpBinder : public IBinder
 {
 public:
                         BpBinder(int32_t handle);
 
+    // 获取句柄值
     inline  int32_t     handle() const { return mHandle; }
 
     virtual const String16&    getInterfaceDescriptor() const;
@@ -36,6 +38,11 @@ public:
     virtual status_t    pingBinder();
     virtual status_t    dump(int fd, const Vector<String16>& args);
 
+    // 向运行在Server进程中的Service组件发送进程间通信请求
+    // 通过Binder驱动程序间接实现的
+    // 将把成员变量mHandle以及进程间通信数据发送给Binder驱动程序
+    // 这样驱动就能够更具句柄值来找到对应的Binder引用对象，继而找到实体对象
+    // 最后将通信数据发送给对应的Service组件
     virtual status_t    transact(   uint32_t code,
                                     const Parcel& data,
                                     Parcel* reply,
@@ -97,6 +104,10 @@ protected:
     virtual bool        onIncStrongAttempted(uint32_t flags, const void* id);
 
 private:
+    // Client组件的一个句柄值
+    // 每一个Client组件在Binder驱动都对应有一个Binder引用对象
+    // 每一个Binder引用对象对应这一个句柄值
+    // Client组件就是通过这个句柄值来和Binder驱动中的Binder引用对象建立对应的关系
     const   int32_t             mHandle;
 
     struct Obituary {
