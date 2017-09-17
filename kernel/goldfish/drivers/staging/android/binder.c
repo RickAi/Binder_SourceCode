@@ -2426,12 +2426,14 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 			struct binder_ref *ref;
 			struct binder_ref_death *death;
 
+			// 获取对象的句柄值和地址值并保存在target和cookie变量中
 			if (get_user(target, (uint32_t __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(uint32_t);
 			if (get_user(cookie, (void __user * __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(void *);
+			// 根据target获取到Binder引用对象ref
 			ref = binder_get_ref(proc, target);
 			if (ref == NULL) {
 				binder_user_error("binder: %d:%d %s "
@@ -2454,6 +2456,8 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 				       ref->strong, ref->weak, ref->node->debug_id);
 
 			if (cmd == BC_REQUEST_DEATH_NOTIFICATION) {
+				// 检查是否已经注册过死亡通知
+				// 驱动不会重复的注册死亡接收通知
 				if (ref->death) {
 					binder_user_error("binder: %d:%"
 						"d BC_REQUEST_DEATH_NOTI"
@@ -2462,6 +2466,7 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 						proc->pid, thread->pid);
 					break;
 				}
+				// 第一次注册的话，会创建出一个binder_ref_death的结构体
 				death = kzalloc(sizeof(*death), GFP_KERNEL);
 				if (death == NULL) {
 					thread->return_error = BR_ERROR;
@@ -2473,10 +2478,14 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 				}
 				binder_stats.obj_created[BINDER_STAT_DEATH]++;
 				INIT_LIST_HEAD(&death->work.entry);
+				// 将cookie保存在它的成员变量cookie中
 				death->cookie = cookie;
 				ref->death = death;
+				// 如果正在注册的Binder引用对象所引用的Binder本地对象已经死亡了
+				// 这时候驱动会马上向Client发送一个死亡接收通知
 				if (ref->node->proc == NULL) {
 					ref->death->work.type = BINDER_WORK_DEAD_BINDER;
+					// 将一个类型为BINDER_WORK_DEAD_BINDER的工作项添加到当前或者当前线程所在的Client进程的todo队列中
 					if (thread->looper & (BINDER_LOOPER_STATE_REGISTERED | BINDER_LOOPER_STATE_ENTERED)) {
 						list_add_tail(&ref->death->work.entry, &thread->todo);
 					} else {
@@ -2504,10 +2513,13 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 						death->cookie, cookie);
 					break;
 				}
+				// 清理用来描述死亡接收者的binder_ref_death结构体
 				ref->death = NULL;
 				if (list_empty(&death->work.entry)) {
 					death->work.type = BINDER_WORK_CLEAR_DEATH_NOTIFICATION;
 					if (thread->looper & (BINDER_LOOPER_STATE_REGISTERED | BINDER_LOOPER_STATE_ENTERED)) {
+						// 向当前线程或者线程所属的Client进程的todo队列中添加一个类型为BINDER_WORK_CLEAR_DEATH_NOTIFICATION的工作项
+						// 然后发送给Client进程
 						list_add_tail(&death->work.entry, &thread->todo);
 					} else {
 						list_add_tail(&death->work.entry, &proc->todo);
@@ -2779,15 +2791,21 @@ retry:
 		case BINDER_WORK_DEAD_BINDER:
 		case BINDER_WORK_DEAD_BINDER_AND_CLEAR:
 		case BINDER_WORK_CLEAR_DEATH_NOTIFICATION: {
+			// Binder线程在空闲时，会睡眠在Binder驱动程序的函数binder_thread_read中，因此，当它们被唤醒时
+			// 就会执行函数binder_thread_read，并且检查自己以及宿主进程的todo队列，看看有没有工作项需要处理
+			//
+			// 获得一个对应的binder_ref_death结构体
 			struct binder_ref_death *death = container_of(w, struct binder_ref_death, work);
 			uint32_t cmd;
 			if (w->type == BINDER_WORK_CLEAR_DEATH_NOTIFICATION)
 				cmd = BR_CLEAR_DEATH_NOTIFICATION_DONE;
 			else
 				cmd = BR_DEAD_BINDER;
+			// 将协议代码和binder_ref_death结构体成员变量写入到Client进程提供的一个用户空间缓冲区中
 			if (put_user(cmd, (uint32_t __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(uint32_t);
+			// 通知Client进程，哪一个Binder代理对象已经死亡
 			if (put_user(death->cookie, (void * __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(void *);
@@ -2804,6 +2822,10 @@ retry:
 				kfree(death);
 				binder_stats.obj_deleted[BINDER_STAT_DEATH]++;
 			} else
+				// 将正在处理的工作项保存在Client进程的一个delivered_death队列中
+				// 当处理完成一个死亡通知之后，它就会使用协议BC_DEAD_BINDER_DONE来通知Binder驱动程序
+				// 如果一个进程的delivered_death队列不为空
+				// 那么就说明Binder驱动程序正在向他发送死亡接受通知
 				list_move(&w->entry, &proc->delivered_death);
 			if (cmd == BR_DEAD_BINDER)
 				goto done; /* DEAD_BINDER notifications can cause transactions */
@@ -3390,8 +3412,22 @@ static void binder_deferred_flush(struct binder_proc *proc)
 		printk(KERN_INFO "binder_flush: %d woke %d threads\n", proc->pid, wake_count);
 }
 
+// Server进程本来就应该常驻在系统中为Client进程提供服务
+// 但是如果出现异常导致它退出
+// 退出之后运行在它里面的Binder本地对象就意外死亡了
+// 这时候Binder驱动程序就应该向那些引用了它的Binder代理对象发送死亡接收通知
+// 以便告知它们引用了一个无效的Binder本地对象
+//
+// Binder驱动程序将设备文件/dev/binder的释放操作设置为函数binder_release
+// Server进程在启动时，会调用函数open来打开这个设备文件/dev/binder
+// 在退出时，它会调用函数close来关闭设备文件/dev/binder
+// 这时候，binder_release会被调用
+// 如果Binder异常退出且没有正常关闭/dev/binder，那么内核就会负责关闭它，这时候也会触发函数binder_release被调用
+// 因此，Binder驱动程序就可以在函数binder_release中检查进程退出时是否有Binder本地对象在里面运行
+// 如果有，说明它们是死亡了的Binder本地对象
 static int binder_release(struct inode *nodp, struct file *filp)
 {
+	// 除了检查进程中是否有Binder本地对象在运行之外，还会释放进程所占用的资源
 	struct binder_proc *proc = filp->private_data;
 	if (binder_proc_dir_entry_proc) {
 		char strbuf[11];
@@ -3399,6 +3435,7 @@ static int binder_release(struct inode *nodp, struct file *filp)
 		remove_proc_entry(strbuf, binder_proc_dir_entry_proc);
 	}
 
+	// 调用函数，将BINDER_DEFERRED_RELEASE类型的延迟操作添加到一个全局的hash列表中
 	binder_defer_work(proc, BINDER_DEFERRED_RELEASE);
 
 	return 0;
@@ -3430,6 +3467,8 @@ static void binder_deferred_release(struct binder_proc *proc)
 	}
 	nodes = 0;
 	incoming_refs = 0;
+	// 循环检查目标进程proc的Binder实体对象列表nodes的每一个Binder实体对象
+	// 如果这些Binder实体对象的Binder引用对象列表refs不为空
 	while ((n = rb_first(&proc->nodes))) {
 		struct binder_node *node = rb_entry(n, struct binder_node, rb_node);
 
@@ -3450,11 +3489,15 @@ static void binder_deferred_release(struct binder_proc *proc)
 
 			hlist_for_each_entry(ref, pos, &node->refs, node_entry) {
 				incoming_refs++;
+				// 循环检查这些引用对象成员变量death是否不等于NULL
 				if (ref->death) {
+					// 如果是，则注册过死亡接收通知
 					death++;
 					if (list_empty(&ref->death->work.entry)) {
+						// 将BINDER_WORK_DEAD_BINDER工作项添加到对应的Client进程的todo队列中
 						ref->death->work.type = BINDER_WORK_DEAD_BINDER;
 						list_add_tail(&ref->death->work.entry, &ref->proc->todo);
+						// 唤醒Client进程的Binder线程来处理这些死亡接收者
 						wake_up_interruptible(&ref->proc->wait);
 					} else
 						BUG();

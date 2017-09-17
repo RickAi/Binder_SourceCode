@@ -193,10 +193,20 @@ status_t BpBinder::transact(
     return DEAD_OBJECT;
 }
 
+// 一个Binder代理对象可以注册多个死亡通知接收者，它们保存在Binder代理对象内部的一个obituary列表中
+// 每一个死亡通知接收者都可以使用一个Obituary对象来描述
+// Binder代理对象内部的成员变脸mObitsSent用来表示Binder驱动程序是否已经向它发送过死亡通知
+// 如果是，则它的值为1
+// 在这种情况下，Binder代理对象的成员函数linkToDeath就会直接返回一个DEAD_OBJECT的值，表示Binder本地对象已经死亡了
+// 如果不是
+// 那么它的成员函数linkToDeath首先会将死亡接收者封装成一个Obituary对象，接着将它添加到内部的列表mObituaries中
+// 如果是第一次注册死亡通知接受者
+// 函数会调用当前线程中的IPCThreadState对象的成员函数requestDeathNotification来向Binder驱动注册一个死亡通知
 status_t BpBinder::linkToDeath(
     const sp<DeathRecipient>& recipient, void* cookie, uint32_t flags)
 {
     Obituary ob;
+    // cookie和flags用来标志一个死亡通知接受者，在注销死亡接受者时会用到
     ob.recipient = recipient;
     ob.cookie = cookie;
     ob.flags = flags;
@@ -217,6 +227,8 @@ status_t BpBinder::linkToDeath(
                 getWeakRefs()->incWeak(this);
                 IPCThreadState* self = IPCThreadState::self();
                 self->requestDeathNotification(mHandle, this);
+                // 促使当前线程马上通过IO控制命令BINDER_WRITE_READ进入到Binder驱动中
+                // 以便可以执行注册死亡接受通知的操作
                 self->flushCommands();
             }
             ssize_t res = mObituaries->add(ob);
@@ -227,6 +239,9 @@ status_t BpBinder::linkToDeath(
     return DEAD_OBJECT;
 }
 
+// recipient: 注册到Binder代理对象内部的一个死亡通知接收者
+// cookie, flags: 标志该死亡通知接受者的数据
+// outRecipient: 输出参数，返回前面所注册的一个死亡通知接收者
 status_t BpBinder::unlinkToDeath(
     const wp<DeathRecipient>& recipient, void* cookie, uint32_t flags,
     wp<DeathRecipient>* outRecipient)
@@ -240,6 +255,7 @@ status_t BpBinder::unlinkToDeath(
     const size_t N = mObituaries ? mObituaries->size() : 0;
     for (size_t i=0; i<N; i++) {
         const Obituary& obit = mObituaries->itemAt(i);
+        // 是否存在与要注销的死亡通知者对应的Obituary
         if ((obit.recipient == recipient
                     || (recipient == NULL && obit.cookie == cookie))
                 && obit.flags == flags) {
@@ -250,8 +266,11 @@ status_t BpBinder::unlinkToDeath(
             mObituaries->removeAt(i);
             if (mObituaries->size() == 0) {
                 LOGV("Clearing death notification: %p handle %d\n", this, mHandle);
+                // 获取IPCThreadState对象
                 IPCThreadState* self = IPCThreadState::self();
+                // 注销死亡接受通知操作
                 self->clearDeathNotification(mHandle, this);
+                // 调用后发送操作马上执行
                 self->flushCommands();
                 delete mObituaries;
                 mObituaries = NULL;
@@ -273,13 +292,16 @@ void BpBinder::sendObituary()
 
     mLock.lock();
     Vector<Obituary>* obits = mObituaries;
+    // 检查该Binder代理对象内部的列表是否为空
     if(obits != NULL) {
         LOGV("Clearing sent death notification: %p handle %d\n", this, mHandle);
         IPCThreadState* self = IPCThreadState::self();
+        // 如果为空，就说明该Binder代理对象之前向Binder驱动程序注册过死亡接收通知
         self->clearDeathNotification(mHandle, this);
         self->flushCommands();
         mObituaries = NULL;
     }
+    // 已经接收过驱动发送过来的死亡接收通知
     mObitsSent = 1;
     mLock.unlock();
 
@@ -289,6 +311,7 @@ void BpBinder::sendObituary()
     if (obits != NULL) {
         const size_t N = obits->size();
         for (size_t i=0; i<N; i++) {
+            // 通知每一个死亡通知接收者，它们所关注的Binder本地对象已经死亡了
             reportOneDeath(obits->itemAt(i));
         }
 
@@ -298,10 +321,12 @@ void BpBinder::sendObituary()
 
 void BpBinder::reportOneDeath(const Obituary& obit)
 {
+    // 获得死亡通知接收者
     sp<DeathRecipient> recipient = obit.recipient.promote();
     LOGV("Reporting death to recipient: %p\n", recipient.get());
     if (recipient == NULL) return;
 
+    // 调用它的成员函数binderDied来处理这个死亡接收通知
     recipient->binderDied(this);
 }
 

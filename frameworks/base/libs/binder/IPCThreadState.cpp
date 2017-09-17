@@ -403,6 +403,8 @@ void IPCThreadState::flushCommands()
 {
     if (mProcess->mDriverFD <= 0)
         return;
+    // 调用talkWithDriver来执行注册操作
+    // 通过IO控制命令BINDER_WRITE_READ来向Binder驱动程序发送一个协议
     talkWithDriver(false);
 }
 
@@ -611,7 +613,9 @@ void IPCThreadState::expungeHandle(int32_t handle, IBinder* binder)
 status_t IPCThreadState::requestDeathNotification(int32_t handle, BpBinder* proxy)
 {
     mOut.writeInt32(BC_REQUEST_DEATH_NOTIFICATION);
+    // 死亡接收通知的Binder代理对象的句柄值
     mOut.writeInt32((int32_t)handle);
+    // 地址值
     mOut.writeInt32((int32_t)proxy);
     return NO_ERROR;
 }
@@ -1054,8 +1058,11 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
     
     case BR_DEAD_BINDER:
         {
+            // 获取到用来接受死亡通知的Binder代理对象
             BpBinder *proxy = (BpBinder*)mIn.readInt32();
+            // 调用方法处理死亡通知
             proxy->sendObituary();
+            // 使用协议BC_DEAD_BINDER_DONE来通知Binder驱动程序，之前所发送的一个死亡接受通知已经处理完成了
             mOut.writeInt32(BC_DEAD_BINDER_DONE);
             mOut.writeInt32((int32_t)proxy);
         } break;
