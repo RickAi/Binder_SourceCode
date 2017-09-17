@@ -1325,12 +1325,32 @@ binder_new_node(struct binder_proc *proc, void __user *ptr, void __user *cookie)
 	return node;
 }
 
+// Binder实体对象是一个类型为binder_node的对象
+// 在驱动中创建，被Binder驱动程序中的Binder引用对象所引用
+// 当Client进程第一次引用一个Binder实体对象时，Binder驱动会在内部创建一个Binder引用对象
+// 例如，当Client进程通过Service Manager来获得一个Service组件时
+// Binder驱动会找到与该Service组件对应的Binder实体对象
+// 接着再创建一个Binder引用对象来引用它
+// 这时需要增加被引用的Binder实体对象的引用计数
+// 相应的
+// 当Client进程不再引用一个Service组件时，它也会请求Binder驱动释放之前为它创建一个Binder引用对象
+// 这时就需要减少该Binder引用对象所引用的实体对象的引用计数
+//
+// node: 增加引用计数的实体对象
+// strong: 增加强引用计数还是弱引用计数
+// internel: 内部引用还是外部引用
+// target_list: 目标进程或线程的todo队列,不为NULL时表示增加Binder实体对象node之后也要相应的增加Binder本地对象的引用计数
+//
+// 当Client进程通过一个Binder引用对象来引用一个Binder实体对象时
+// Binder驱动会增加它的外部引用对象
+// 同时为了避免Binder实体对象被过早的销毁
 static int
 binder_inc_node(struct binder_node *node, int strong, int internal,
 		struct list_head *target_list)
 {
 	if (strong) {
 		if (internal) {
+			// 需要增加Binder实体对象node的外部强引用计数
 			if (target_list == NULL &&
 			    node->internal_strong_refs == 0 &&
 			    !(node == binder_context_mgr_node &&
@@ -1341,6 +1361,7 @@ binder_inc_node(struct binder_node *node, int strong, int internal,
 			}
 			node->internal_strong_refs++;
 		} else
+			// 增加Binder实体对象node的内部强引用计数
 			node->local_strong_refs++;
 		if (!node->has_strong_ref && target_list) {
 			list_del_init(&node->work.entry);
@@ -1349,6 +1370,8 @@ binder_inc_node(struct binder_node *node, int strong, int internal,
 	} else {
 		if (!internal)
 			node->local_weak_refs++;
+		// 在调用binder_inc_node之前，已经将一个对应的Binder引用对象添加到Binder实体对象noe的Binder引用对象列表中
+		// 增加了Binder实体对象node的外部弱引用计数
 		if (!node->has_weak_ref && list_empty(&node->work.entry)) {
 			if (target_list == NULL) {
 				printk(KERN_ERR "binder: invalid inc weak node "
@@ -1361,13 +1384,19 @@ binder_inc_node(struct binder_node *node, int strong, int internal,
 	return 0;
 }
 
+// 减少Binder实体对象的引用计数
+// node: 要减少的引用计数Binder实体对象
+// strong: 是否要减少强引用计数
+// internal: 是否减少内部引用计数
 static int
 binder_dec_node(struct binder_node *node, int strong, int internal)
 {
 	if (strong) {
 		if (internal)
+			// 减少外部强引用计数
 			node->internal_strong_refs--;
 		else
+			// 减少内部强引用
 			node->local_strong_refs--;
 		if (node->local_strong_refs || node->internal_strong_refs)
 			return 0;
@@ -1378,23 +1407,33 @@ binder_dec_node(struct binder_node *node, int strong, int internal)
 			return 0;
 	}
 	if (node->proc && (node->has_strong_ref || node->has_weak_ref)) {
+		// Binder实体对象node的强引用或者弱引用计数等于0
 		if (list_empty(&node->work.entry)) {
+			// 减少Binder实体对象node对应的Binder本地对象的强引用计数或者弱引用计数
 			list_add_tail(&node->work.entry, &node->proc->todo);
 			wake_up_interruptible(&node->proc->wait);
 		}
 	} else {
+		// 要么Binder实体对象node的宿主进程结构体为NULL，要么成员变量has_strong_ref和has_weak_ref都等于0
 		if (hlist_empty(&node->refs) && !node->local_strong_refs &&
 		    !node->local_weak_refs) {
+			// 如果Binder实体对象node的所有引用计数都等于0
+			// 那么将要销毁Binder实体对象node
 			list_del_init(&node->work.entry);
 			if (node->proc) {
+				// 如果宿主对象不为空，说明它保存在实体对象红黑树中
+				// 将会把它从红黑树中删除
 				rb_erase(&node->rb_node, &node->proc->nodes);
 				if (binder_debug_mask & BINDER_DEBUG_INTERNAL_REFS)
 					printk(KERN_INFO "binder: refless node %d deleted\n", node->debug_id);
 			} else {
+				// 如果宿主进程结构体为NULL
+				// 那么实体对象node保存在死亡Binder实体对象列表中
 				hlist_del(&node->dead_node);
 				if (binder_debug_mask & BINDER_DEBUG_INTERNAL_REFS)
 					printk(KERN_INFO "binder: dead node %d deleted\n", node->debug_id);
 			}
+			// 最后调用kfree来销毁Binder实体对象
 			kfree(node);
 			binder_stats.obj_deleted[BINDER_STAT_NODE]++;
 		}
@@ -1496,21 +1535,30 @@ binder_delete_ref(struct binder_ref *ref)
 		printk(KERN_INFO "binder: %d delete ref %d desc %d for "
 			"node %d\n", ref->proc->pid, ref->debug_id,
 			ref->desc, ref->node->debug_id);
+	// 将ref从宿主进程中的两个红黑树中移除
 	rb_erase(&ref->rb_node_desc, &ref->proc->refs_by_desc);
 	rb_erase(&ref->rb_node_node, &ref->proc->refs_by_node);
+	// 如果是被强行移除的，即强引用计数还大于0的情况
 	if (ref->strong)
+		// 调用函数binder_dec_node来减少它引用的Binder实体对象的外部强引用计数
 		binder_dec_node(ref->node, 1, 1);
+	// 一个Binder引用对象还保存在它所引用的Binder实体对象的Binder引用对象列表中
+	// 因此需要进行移出
 	hlist_del(&ref->node_entry);
+	// 减少一个即将销毁的Binder引用对象所引用的Binder实体对象的外部弱引用计数
 	binder_dec_node(ref->node, 0, 1);
+	// 是否注册了一个死亡接受通知
 	if (ref->death) {
 		if (binder_debug_mask & BINDER_DEBUG_DEAD_BINDER)
 			printk(KERN_INFO "binder: %d delete ref %d desc %d "
 				"has death notification\n", ref->proc->pid,
 				ref->debug_id, ref->desc);
+		// 如果是，那么久删除以及销毁该死亡接受通知
 		list_del(&ref->death->work.entry);
 		kfree(ref->death);
 		binder_stats.obj_deleted[BINDER_STAT_DEATH]++;
 	}
+	// 销毁Binder的引用对象
 	kfree(ref);
 	binder_stats.obj_deleted[BINDER_STAT_REF]++;
 }
@@ -1567,6 +1615,7 @@ binder_dec_ref(struct binder_ref *ref, int strong)
 		}
 		ref->weak--;
 	}
+	// 当强引用和弱引用计数都为0时，此时调用binder_delete_ref删除该binder_ref
 	if (ref->strong == 0 && ref->weak == 0)
 		binder_delete_ref(ref);
 	return 0;
@@ -2120,6 +2169,15 @@ binder_transaction_buffer_release(struct binder_proc *proc, struct binder_buffer
 	}
 }
 
+// Binder引用对象为binder_ref
+// 它在Binder驱动程序中创建，并且被用户空间中的Binder代理对象所引用
+// 当Client进程引用了Server进程中的一个Binder本地对象时，Binder驱动程序就会在内部为它创建了一个Binder引用对象
+// Binder引用对象运行在内核空间，引用了它的Binder代理对象运行在用户空间
+// Client与Binder驱动需要约定一套规则来维护Binder引用对象的引用计数，避免它们在还被Binder代理对象引用的情况下被销毁
+//
+// 驱动会根据Client进程传进来的句柄值找到需要修改引用计数的Binder引用对象
+// 句柄值是Binder驱动程序为Client进程创建的
+// 用来关联用户空间的Binder代理对象和内核空间的Binder引用对象
 int
 binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 		    void __user *buffer, int size, signed long *consumed)
@@ -2146,11 +2204,15 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 			struct binder_ref *ref;
 			const char *debug_string;
 
+			// 获取句柄值，保存在target中
 			if (get_user(target, (uint32_t __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(uint32_t);
+			// 得到目标Binder引用对象ref
+			// 判断句柄值是否为0
 			if (target == 0 && binder_context_mgr_node &&
 			    (cmd == BC_INCREFS || cmd == BC_ACQUIRE)) {
+				// 是否存在一个引用了ServiceManager的实体对象
 				ref = binder_get_ref_for_node(proc,
 					       binder_context_mgr_node);
 				if (ref->desc != target) {
@@ -2169,6 +2231,7 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 					proc->pid, thread->pid, target);
 				break;
 			}
+			// 根据不同的协议来增加或者减少它的强引用计数或者弱引用计数
 			switch (cmd) {
 			case BC_INCREFS:
 				debug_string = "IncRefs";
@@ -2595,12 +2658,17 @@ retry:
 	if (ret)
 		return ret;
 
+	// 当驱动和目标进程/线程通信时
+	// 会把一个工作项加入到它的todo队列中
+	// 目标进程/进程会不断的调用驱动中的函数binder_thread_read来检查它的todo队列中有没有新的工作项
+	// 如果有，目标进程/线程就会把它取出来，并且返回到用户空间去处理
 	while (1) {
 		uint32_t cmd;
 		struct binder_transaction_data tr;
 		struct binder_work *w;
 		struct binder_transaction *t = NULL;
 
+		// 检查目标进程/线程中的todo队列，并且将里面的待处理工作项保存在w中
 		if (!list_empty(&thread->todo))
 			w = list_first_entry(&thread->todo, struct binder_work, entry);
 		else if (!list_empty(&proc->todo) && wait_for_proc_work)
@@ -2637,30 +2705,47 @@ retry:
 			struct binder_node *node = container_of(w, struct binder_node, work);
 			uint32_t cmd = BR_NOOP;
 			const char *cmd_name;
+			// 检查该Binder实体对象是否有强引用和弱引用计数
 			int strong = node->internal_strong_refs || node->local_strong_refs;
+			// 是否有弱引用计数
 			int weak = !hlist_empty(&node->refs) || node->local_weak_refs || strong;
 			if (weak && !node->has_weak_ref) {
+				// Binder实体对象已经引用了一个Binder本地对象
+				// 但是并没有增加它的弱引用计数
+				// 使用BC_INCREFS来增加对应的Binder本地对象的弱引用计数
 				cmd = BR_INCREFS;
 				cmd_name = "BR_INCREFS";
 				node->has_weak_ref = 1;
 				node->pending_weak_ref = 1;
 				node->local_weak_refs++;
 			} else if (strong && !node->has_strong_ref) {
+				// Binder实体对象已经引用了一个Binder本地对象
+				// 但是并没有增加它的强引用计数
+				// 使用BC_ACQUIRE协议来请求增加对应的Binder本地对象的强引用计数
 				cmd = BR_ACQUIRE;
 				cmd_name = "BR_ACQUIRE";
 				node->has_strong_ref = 1;
 				node->pending_strong_ref = 1;
 				node->local_strong_refs++;
 			} else if (!strong && node->has_strong_ref) {
+				// Binder实体对象已经不再引用一个Binder本地对象
+				// 但是没有减少它的强引用计数
+				// 使用BR_RELEASE协议来请求减少对应的Binder本地对象的强引用计数
 				cmd = BR_RELEASE;
 				cmd_name = "BR_RELEASE";
 				node->has_strong_ref = 0;
 			} else if (!weak && node->has_weak_ref) {
+				// Binder实体对象已经不再引用Binder本地对象
+				// 但是没有减少它的弱引用计数
+				// 使用BR_DECREFS协议来请求减少对应的Binder本地对象的弱引用计数
 				cmd = BR_DECREFS;
 				cmd_name = "BR_DECREFS";
 				node->has_weak_ref = 0;
 			}
 			if (cmd != BR_NOOP) {
+				// 将前面准备好的协议以及协议内容写入到由Server进程所提供的一个用户空间缓冲区
+				// 然后返回到Server进程的用户空间
+				// Server进程通过Binder库提供的IPCThreadState接口来处理Binder驱动程序所发送的协议
 				if (put_user(cmd, (uint32_t __user *)ptr))
 					return -EFAULT;
 				ptr += sizeof(uint32_t);

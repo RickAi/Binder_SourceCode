@@ -569,6 +569,9 @@ void IPCThreadState::decStrongHandle(int32_t handle)
 void IPCThreadState::incWeakHandle(int32_t handle)
 {
     LOG_REMOTEREFS("IPCThreadState::incWeakHandle(%d)\n", handle);
+    // 增加Binder引用对象的弱引用计数的操作缓存在内部的一个成员变量mOut中
+    // 等下次使用IO控制命令BINDER_WRITE_READ进入到Binder驱动时
+    // 再请求Binder驱动增加相应的Binder引用对象的弱引用计数
     mOut.writeInt32(BC_INCREFS);
     mOut.writeInt32(handle);
 }
@@ -872,6 +875,9 @@ void setTheContextObject(sp<BBinder> obj)
     the_context_object = obj;
 }
 
+// 驱动请求Server进程增加或减少Binder本地对象的强弱引用计数时
+// 会将该Binder本地对象内部的弱引用计数对象及该Binder本地对象的地址传递过来
+// 驱动传递给Server金策会给你的数据保存到mIn中
 status_t IPCThreadState::executeCommand(int32_t cmd)
 {
     BBinder* obj;
@@ -892,12 +898,15 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
         LOG_ASSERT(refs->refBase() == obj,
                    "BR_ACQUIRE: object %p does not match cookie %p (expected %p)",
                    refs, obj, refs->refBase());
+        // 直接增加本地对象的引用计数
         obj->incStrong(mProcess.get());
         IF_LOG_REMOTEREFS() {
             LOG_REMOTEREFS("BR_ACQUIRE from driver on %p", obj);
             obj->printRefs();
         }
+        // 写入协议，通知Binder驱动
         mOut.writeInt32(BC_ACQUIRE_DONE);
+        // 写回引用计数和Binder本地对象
         mOut.writeInt32((int32_t)refs);
         mOut.writeInt32((int32_t)obj);
         break;
@@ -912,12 +921,16 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
             LOG_REMOTEREFS("BR_RELEASE from driver on %p", obj);
             obj->printRefs();
         }
+        // 减少Binder本地引用计数
+        // 缓存在pending队列中，不需要马上去处理
+        // 减少相对于增加，没有那么重要，让程序优先去做其它更重要的事情
         mPendingStrongDerefs.push(obj);
         break;
         
     case BR_INCREFS:
         refs = (RefBase::weakref_type*)mIn.readInt32();
         obj = (BBinder*)mIn.readInt32();
+        // 直接增加
         refs->incWeak(mProcess.get());
         mOut.writeInt32(BC_INCREFS_DONE);
         mOut.writeInt32((int32_t)refs);

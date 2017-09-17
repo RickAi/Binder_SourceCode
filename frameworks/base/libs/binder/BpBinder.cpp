@@ -86,6 +86,27 @@ void BpBinder::ObjectManager::kill()
 
 // ---------------------------------------------------------------------------
 
+// Binder代理对象是一个类型为BpBinder的对象，它是在用户空间中创建的
+// 运行在Client进程中
+// 与Binder本地对象类似，Binder代理对象一方面会被运行在Client进程中的其他对象引用
+// 一方面它也会引用Binder驱动程序中的Binder引用对象
+// BpBinder继承了RefBase类
+// 其它对象可以通过智能指针来引用这些代理对象，以便控制它们的生命周期
+// Binder驱动程序中的Binder引用对象是运行在内核空间中的，Binder代理对象不能通过智能指针来引用它们
+// 需要通过四个协议来引用Binder驱动中的Binder引用对象
+//
+// 每一个Binder代理对象都是通过一个句柄值来和一个Binder引用对象关联的
+// Client进程通过这个句柄值来维护运行在它里面的Binder代理对象
+// 通常，Client进程会在内部建立一个handle_entry类型的Binder代理对象列表
+// 以句柄值作为关键字来维护它内部所有的Binder代理对象
+//
+// 结构体内部有一个IBinder指针，指向一个BpBinder对象，即代理对象
+// 每当Client代理对象列表中检查是否已经存在对应的handle_entry结构体
+// 如果存在，那么Client进程就会使用该handle_entry结构体内部的IBinder指针所指向的BpBinder对象来和Server进程通信
+// 如果不存在,Client进程就会先创建一个BpBinder对象，并且将它保存在handle_entry结构体中
+// 以及handle_entry结构体保存在内部Binder代理对象列表中
+// 这样做的好处是可以避免创建重复的Binder代理对象来引用Binder驱动中的同一个Binder引用对象
+// 每一个Binder代理对象在创建时都会增加对应的Binder引用对象的引用计数
 BpBinder::BpBinder(int32_t handle)
     : mHandle(handle)
     , mAlive(1)
@@ -94,7 +115,9 @@ BpBinder::BpBinder(int32_t handle)
 {
     LOGV("Creating BpBinder %p handle %d\n", this, mHandle);
 
+    // 设置Binder代理对象的生命周期受到弱引用计数的影响
     extendObjectLifetime(OBJECT_LIFETIME_WEAK);
+    // 调用当前线程内部的IPCThreadState对象的成员函数来增加相应的Binder引用对象的弱引用计数
     IPCThreadState::self()->incWeakHandle(handle);
 }
 
@@ -332,17 +355,23 @@ BpBinder::~BpBinder()
 
     if (ipc) {
         ipc->expungeHandle(mHandle, this);
+        // 当一个Binder代理对象销毁时，当前线程就会调用内部的IPCThreadState对象函数来减少相应的Binder引用对象的弱引用计数
         ipc->decWeakHandle(mHandle);
     }
 }
 
+// 当一个Binder代理对象不再被任何强指针引用时，Cient进程就会请求Binder驱动减少相应的Binder引用对象的强引用计数
 void BpBinder::onFirstRef()
 {
     LOGV("onFirstRef BpBinder %p handle %d\n", this, mHandle);
     IPCThreadState* ipc = IPCThreadState::self();
+    // 调用相应的函数以增加相应的Binder引用对象的强引用计数
     if (ipc) ipc->incStrongHandle(mHandle);
 }
 
+// Binder代理对象的引用计数与它所引用的Binder引用对象的引用计数是多对一的关系
+// 这样做可以减少Client进程和Binder驱动程序之间的交互
+// 减少它们之间的协议来往
 void BpBinder::onLastStrongRef(const void* id)
 {
     LOGV("onLastStrongRef BpBinder %p handle %d\n", this, mHandle);
@@ -350,6 +379,7 @@ void BpBinder::onLastStrongRef(const void* id)
         printRefs();
     }
     IPCThreadState* ipc = IPCThreadState::self();
+    // 调用函数以减少Binder引用对象的强引用计数
     if (ipc) ipc->decStrongHandle(mHandle);
 }
 
