@@ -31,13 +31,17 @@
 
 namespace android {
 
+// 单例
 sp<IServiceManager> defaultServiceManager()
 {
+    // 全局变量gDefaultServiceManager是一个IServiceManager的强指针
+    // 指向进程内的一个BpServiceManager对象
     if (gDefaultServiceManager != NULL) return gDefaultServiceManager;
     
     {
         AutoMutex _l(gDefaultServiceManagerLock);
         if (gDefaultServiceManager == NULL) {
+            // 获取ProcessState对象，创建一个Binder代理对象，调用模板函数将前面获得的Binder代理对象封装成一个Service Manager代理对象
             gDefaultServiceManager = interface_cast<IServiceManager>(
                 ProcessState::self()->getContextObject(NULL));
         }
@@ -151,12 +155,25 @@ public:
         return reply.readStrongBinder();
     }
 
+    // 添加service
     virtual status_t addService(const String16& name, const sp<IBinder>& service)
     {
+        // 1. 封装成一个Parcel对象
+        // 2. Client发送BR_TRANSACTION到驱动
+        // 3. 驱动发送BR_TRANSACTION_COMPLETE返回协议到Client
+        // 4. Client接受BR_TRANSACTION_COMPLETE返回协议，对它进行处理后，再次进入Binder驱动程序等待Server进程
+        // 5. 驱动向Server发送BR_TRANSACTION,请求目标server进程处理该进程通信请求
+        // 6. Server收到Binder驱动BR_TRANSACTION返回协议，并且对它进行处理之后，就会向Binder驱动发送BC_REPLY命令协议
+        // 7. 驱动程序根据协议内容找到目标Client就会向Server发送BR_TRANSACTION_COMPLETE返回协议
+        // 8. Server进程接收到驱动发送它的BR_TRANSACTION_COMPLETE返回协议，并且对它进行处理之后，一次进程间通信过程就结束了
+        // 9. Binder驱动向Server进程发送BR_TRANSACTION_COMPLETE返回协议的同时，也会向Client进程发送BR_REPLY,表示Server进程已经处理完成的进程间通信
         Parcel data, reply;
         data.writeInterfaceToken(IServiceManager::getInterfaceDescriptor());
+        // 写入组件名称
         data.writeString16(name);
+        // 将要注册的service组件封装成一个flat_binder_object，传递个驱动
         data.writeStrongBinder(service);
+        // 调用transact发送BC_TRANSACTION命令协议
         status_t err = remote()->transact(ADD_SERVICE_TRANSACTION, data, &reply);
         return err == NO_ERROR ? reply.readExceptionCode() : err;
     }

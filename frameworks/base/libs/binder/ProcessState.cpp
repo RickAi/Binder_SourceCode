@@ -73,6 +73,7 @@ protected:
     const bool mIsMain;
 };
 
+// 单例
 sp<ProcessState> ProcessState::self()
 {
     if (gProcess != NULL) return gProcess;
@@ -95,6 +96,7 @@ void ProcessState::setContextObject(const sp<IBinder>& object)
 
 sp<IBinder> ProcessState::getContextObject(const sp<IBinder>& caller)
 {
+    // 检查进程是否打开了设备/dev/binder
     if (supportsProcesses()) {
         return getStrongProxyForHandle(0);
     } else {
@@ -196,21 +198,27 @@ ProcessState::handle_entry* ProcessState::lookupHandleLocked(int32_t handle)
 {
     const size_t N=mHandleToObject.size();
     if (N <= (size_t)handle) {
+        // mHanldeToObject不存在这个handle_entry结构体
         handle_entry e;
         e.binder = NULL;
         e.refs = NULL;
+        // 插入一个结构体
         status_t err = mHandleToObject.insertAt(e, N, handle+1-N);
         if (err < NO_ERROR) return NULL;
     }
+    // 返回给调用者
     return &mHandleToObject.editItemAt(handle);
 }
 
+// 创建一个Binder代理对象
 sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
 {
     sp<IBinder> result;
 
     AutoMutex _l(mLock);
 
+    // Binder代理对象的生命周期期间每一个进程维护了一个handle_entry类型的Binder代理对象列表
+    // 通过句柄值找到对应的handle_entry结构体
     handle_entry* e = lookupHandleLocked(handle);
 
     if (e != NULL) {
@@ -331,6 +339,7 @@ static int open_driver()
         fcntl(fd, F_SETFD, FD_CLOEXEC);
         int vers;
 #if defined(HAVE_ANDROID_OS)
+        // 获取Binder版本号
         status_t result = ioctl(fd, BINDER_VERSION, &vers);
 #else
         status_t result = -1;
@@ -348,6 +357,7 @@ static int open_driver()
         }
 #if defined(HAVE_ANDROID_OS)
         size_t maxThreads = 15;
+        // 设置最多创建的Binder线程个数
         result = ioctl(fd, BINDER_SET_MAX_THREADS, &maxThreads);
         if (result == -1) {
             LOGE("Binder ioctl to set max threads failed: %s", strerror(errno));

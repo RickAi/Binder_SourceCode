@@ -255,19 +255,29 @@ int svcmgr_handler(struct binder_state *bs,
     return 0;
 }
 
+// Service Manager 是Binder进程间通信机制的核心组件之一，它扮演着进程间机制上下文管理者的角色
+// 负责管理系统中Service组件，并且向Client组件提供获取Service代理对象的服务
+// Service Manager运行在一个独立的进程中
+// Service组件通常和Client组件也需要通过进程间通信机制来和它交互
+// 采用的进程间通信机制正好也是Binder进程间通信机制
+// ServiceManager是由init进程负责启动的
+// 因此，ServiceManager也是在系统启动时启动的
 int main(int argc, char **argv)
 {
     struct binder_state *bs;
     void *svcmgr = BINDER_SERVICE_MANAGER;
 
+    // 调用函数打开设备文件/dev/binder，将它映射到本进程的地址空间
     bs = binder_open(128*1024);
 
+    // 将自己注册为Binder进程间通信机制的上下文管理者
     if (binder_become_context_manager(bs)) {
         LOGE("cannot become context manager (%s)\n", strerror(errno));
         return -1;
     }
 
     svcmgr_handle = svcmgr;
+    // 循环等待和处理Client进程的通信
     binder_loop(bs, svcmgr_handler);
     return 0;
 }

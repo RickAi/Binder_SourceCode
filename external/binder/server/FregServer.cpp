@@ -35,6 +35,7 @@ public:
 public:
 	static void instantiate()
 	{
+		// 获取service manager对象,注册service
 		defaultServiceManager()->addService(String16(FREG_SERVICE), new FregService());
 	}
 

@@ -148,6 +148,7 @@ status_t flatten_binder(const sp<ProcessState>& proc,
 {
     flat_binder_object obj;
     
+    // 设置标志值
     obj.flags = 0x7f | FLAT_BINDER_FLAG_ACCEPTS_FDS;
     if (binder != NULL) {
         IBinder *local = binder->localBinder();
@@ -171,6 +172,7 @@ status_t flatten_binder(const sp<ProcessState>& proc,
         obj.cookie = NULL;
     }
     
+    // 将obj写入到out对象中
     return finish_flatten_binder(binder, obj, out);
 }
 
@@ -443,9 +445,12 @@ bool Parcel::hasFileDescriptors() const
     return mHasFds;
 }
 
+// 写入Binder进程间通信请求头
 // Write RPC headers.  (previously just the interface token)
 status_t Parcel::writeInterfaceToken(const String16& interface)
 {
+    // 写入一个strict mode policy
+    // 使server线程替client运行时也遵守相应的policy
     writeInt32(IPCThreadState::self()->getStrictModePolicy() |
                STRICT_MODE_PENALTY_GATHER);
     // currently the interface identification token is just its name as a string
@@ -740,12 +745,18 @@ status_t Parcel::write(const Flattenable& val)
     return err;
 }
 
+// Parcel内部有mData和mObjects两个缓冲区
+// mData是一个数据缓冲区，里面内容包含证书，字符串或者Binder对象，即flat_binder_object结构体
+// mObjects是一个偏移数组，保存了mData所有Binder对象的位置
 status_t Parcel::writeObject(const flat_binder_object& val, bool nullMetaData)
 {
+    // mDataPos记录了缓冲区mData下一个用来写数据的位置
+    // mDataCapacity记录了mData的总大小
     const bool enoughData = (mDataPos+sizeof(val)) <= mDataCapacity;
     const bool enoughObjects = mObjectsSize < mObjectsCapacity;
     if (enoughData && enoughObjects) {
 restart_write:
+        // 拥有足够空间写入一个Binder对象
         *reinterpret_cast<flat_binder_object*>(mData+mDataPos) = val;
         
         // Need to write meta-data?
@@ -763,6 +774,7 @@ restart_write:
         return finishWrite(sizeof(flat_binder_object));
     }
 
+    // 如果没有充足空间，会先扩展空间
     if (!enoughData) {
         const status_t err = growData(sizeof(val));
         if (err != NO_ERROR) return err;

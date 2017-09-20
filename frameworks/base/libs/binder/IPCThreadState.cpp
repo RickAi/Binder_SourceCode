@@ -496,8 +496,10 @@ status_t IPCThreadState::transact(int32_t handle,
                                   uint32_t code, const Parcel& data,
                                   Parcel* reply, uint32_t flags)
 {
+    // 检查通信数据是否正确
     status_t err = data.errorCheck();
 
+    // 设置flags的TF_ACCEPT_FDS位为1，表示允许server在结果中携带文件描述符
     flags |= TF_ACCEPT_FDS;
 
     IF_LOG_TRANSACTIONS() {
@@ -510,6 +512,7 @@ status_t IPCThreadState::transact(int32_t handle,
     if (err == NO_ERROR) {
         LOG_ONEWAY(">>>> SEND from pid %d uid %d %s", getpid(), getuid(),
             (flags & TF_ONE_WAY) == 0 ? "READ REPLY" : "ONE WAY");
+        // 封装到binder_transaction_data结构体中
         err = writeTransactionData(BC_TRANSACTION, flags, handle, code, data, NULL);
     }
     
@@ -527,6 +530,7 @@ status_t IPCThreadState::transact(int32_t handle,
         }
         #endif
         if (reply) {
+            // 发送协议，接受reply
             err = waitForResponse(reply);
         } else {
             Parcel fakeReply;
@@ -660,6 +664,7 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
     int32_t err;
 
     while (1) {
+        // 通过一个循环不断调用成员函数talkWithDriver与Binder驱动进行交互
         if ((err=talkWithDriver()) < NO_ERROR) break;
         err = mIn.errorCheck();
         if (err < NO_ERROR) break;
@@ -752,6 +757,8 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
     binder_write_read bwr;
     
     // Is the read buffer empty?
+    // mIn保存那些从Binder驱动接收到的返回协议
+    // mOut保存发送给Binder驱动的命令协议
     const bool needRead = mIn.dataPosition() >= mIn.dataSize();
     
     // We don't want to write anything if we are still reading
@@ -795,6 +802,9 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
             alog << "About to read/write, write size = " << mOut.dataSize() << endl;
         }
 #if defined(HAVE_ANDROID_OS)
+        // 使用io控制命令BINDER_WRITE_READ来与驱动进行交互
+        // 首先会调用binder_thread_write来处理进程给驱动发送的命令协议
+        // 然后会调用binder_thread_read来读取驱动返回的命令协议
         if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0)
             err = NO_ERROR;
         else
@@ -851,6 +861,7 @@ status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
     
     const status_t err = data.errorCheck();
     if (err == NO_ERROR) {
+        // 内部数据缓冲区和偏移数组写入到tr中
         tr.data_size = data.ipcDataSize();
         tr.data.ptr.buffer = data.ipcData();
         tr.offsets_size = data.ipcObjectsCount()*sizeof(size_t);
@@ -866,6 +877,7 @@ status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
         return (mLastError = err);
     }
     
+    // 将命令协议号与binder_transaction_data结构体tr写入到IPCThreadState变量mOut所描述的一个命令协议缓冲区中
     mOut.writeInt32(cmd);
     mOut.write(&tr, sizeof(tr));
     

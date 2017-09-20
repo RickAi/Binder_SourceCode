@@ -38,6 +38,7 @@ protected:
 
 // ----------------------------------------------------------------------
 
+// 句柄值为0的Binder代理对象封装为一个Service Manager代理对象
 template<typename INTERFACE>
 inline sp<INTERFACE> interface_cast(const sp<IBinder>& obj)
 {

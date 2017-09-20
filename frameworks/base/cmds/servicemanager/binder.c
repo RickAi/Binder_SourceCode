@@ -84,10 +84,17 @@ const char *cmd_name(uint32_t cmd)
 #define BIO_F_IOERROR   0x04
 #define BIO_F_MALLOCED  0x08  /* needs to be free()'d */
 
+// Service Manager打开了设备文件/dev/binder之后，就会得到文件描述符
 struct binder_state
 {
+    // 文件描述符保存在变量fd中
     int fd;
+    // 打开设备文件后，需要将设备文件映射到进程的地址空间，以便可以为驱动分配内核缓冲区来保存进程通信数据
+    // servicemanager需要将设备文件/dev/binder映射到自己的进程地址空间
+    //
+    // 映射后的起始地址
     void *mapped;
+    // 映射后的地址空间大小
     unsigned mapsize;
 };
 
@@ -101,6 +108,7 @@ struct binder_state *binder_open(unsigned mapsize)
         return 0;
     }
 
+    // 打开设备文件
     bs->fd = open("/dev/binder", O_RDWR);
     if (bs->fd < 0) {
         fprintf(stderr,"binder: cannot open device (%s)\n",
@@ -108,7 +116,10 @@ struct binder_state *binder_open(unsigned mapsize)
         goto fail_open;
     }
 
+    // mapsize是128*1024=128K
     bs->mapsize = mapsize;
+    // 请求分配128K的内核缓冲区
+    // 映射后得到的地址空间起始地址和大小分别保存在binder_state->mapped和mapsize中
     bs->mapped = mmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, bs->fd, 0);
     if (bs->mapped == MAP_FAILED) {
         fprintf(stderr,"binder: cannot map device (%s)\n",
@@ -146,9 +157,12 @@ int binder_write(struct binder_state *bs, void *data, unsigned len)
     bwr.write_size = len;
     bwr.write_consumed = 0;
     bwr.write_buffer = (unsigned) data;
+    // 输出缓冲区设置为空，当前线程将自己注册到Binder驱动后，就会马上返回用户空间
+    // 不会在Binder驱动程序中等待Client
     bwr.read_size = 0;
     bwr.read_consumed = 0;
     bwr.read_buffer = 0;
+    // 进行注册
     res = ioctl(bs->fd, BINDER_WRITE_READ, &bwr);
     if (res < 0) {
         fprintf(stderr,"binder_write: ioctl failed (%s)\n",
@@ -354,6 +368,11 @@ fail:
     return -1;
 }
 
+// 由于service manager需要在系统运行期间为Service组件和Client组件提供服务
+// 它就需要通过一个无限循环来等待和处理service和client的进程间通信请求
+//
+// bs: binder_open中创建的一个binder_state结构体
+// func: 指向servicemanger函数svcmgr_handler, 用来处理service组件和client组件进程间通信请求
 void binder_loop(struct binder_state *bs, binder_handler func)
 {
     int res;
@@ -364,7 +383,9 @@ void binder_loop(struct binder_state *bs, binder_handler func)
     bwr.write_consumed = 0;
     bwr.write_buffer = 0;
     
+    // 通过BC_ENTER_LOOPER将自己注册到Binder驱动程序中
     readbuf[0] = BC_ENTER_LOOPER;
+    // 调用binder_write将它发送到Binder驱动程序中
     binder_write(bs, readbuf, sizeof(unsigned));
 
     for (;;) {
@@ -379,6 +400,8 @@ void binder_loop(struct binder_state *bs, binder_handler func)
             break;
         }
 
+        // 如果有请求处理，会交给binder_parse来处理
+        // 否则睡眠等待，直到有进程间通信请求来到为止
         res = binder_parse(bs, 0, readbuf, bwr.read_consumed, func);
         if (res == 0) {
             LOGE("binder_loop: unexpected reply?!\n");
