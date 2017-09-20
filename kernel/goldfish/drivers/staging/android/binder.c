@@ -1267,6 +1267,9 @@ static void binder_free_buf(
 	binder_insert_free_buffer(proc, buffer);
 }
 
+// 根据一个用户空间地址ptr在目标进程proc中找到一个对应的Binder实体对象
+// Binder实体对象的关键字是ptr，保存在红黑树nodes中
+// 在目标进程proc的Binder实体对象红黑树nodes中检查是否存在一个与参数ptr对应的Binder实体对象
 static struct binder_node *
 binder_get_node(struct binder_proc *proc, void __user *ptr)
 {
@@ -1474,6 +1477,7 @@ binder_get_ref_for_node(struct binder_proc *proc, struct binder_node *node)
 	struct rb_node *parent = NULL;
 	struct binder_ref *ref, *new_ref;
 
+	// 首先判断是否已经在目标进程proc中为Binder实体对象node创建过一个Binder引用对象
 	while (*p) {
 		parent = *p;
 		ref = rb_entry(parent, struct binder_ref, rb_node_node);
@@ -1485,6 +1489,7 @@ binder_get_ref_for_node(struct binder_proc *proc, struct binder_node *node)
 		else
 			return ref;
 	}
+	// 为proc创建一个Binder引用对象new_ref
 	new_ref = kzalloc(sizeof(*ref), GFP_KERNEL);
 	if (new_ref == NULL)
 		return NULL;
@@ -1492,11 +1497,15 @@ binder_get_ref_for_node(struct binder_proc *proc, struct binder_node *node)
 	new_ref->debug_id = ++binder_last_id;
 	new_ref->proc = proc;
 	new_ref->node = node;
+	// 将引用添加到红黑树refs_by_node中
 	rb_link_node(&new_ref->rb_node_node, parent, p);
 	rb_insert_color(&new_ref->rb_node_node, &proc->refs_by_node);
 
+	// 为新创建的Binder引用对象new_ref分配句柄值
+	// 检查是否引用了service manager的Binder实体对象binder_context_mgr_node
 	new_ref->desc = (node == binder_context_mgr_node) ? 0 : 1;
 	for (n = rb_first(&proc->refs_by_desc); n != NULL; n = rb_next(n)) {
+		// 在proc中找到一个未使用的最小句柄值作为新创建的Binder引用对象new_ref的句柄值
 		ref = rb_entry(n, struct binder_ref, rb_node_desc);
 		if (ref->desc > new_ref->desc)
 			break;
@@ -1504,6 +1513,7 @@ binder_get_ref_for_node(struct binder_proc *proc, struct binder_node *node)
 	}
 
 	p = &proc->refs_by_desc.rb_node;
+	// 在此确认前面为Binder引用对象new_ref分配的句柄值是有效的
 	while (*p) {
 		parent = *p;
 		ref = rb_entry(parent, struct binder_ref, rb_node_desc);
@@ -1515,8 +1525,10 @@ binder_get_ref_for_node(struct binder_proc *proc, struct binder_node *node)
 		else
 			BUG();
 	}
+	// 将Binder引用对象new_ref添加到目标进程proc的红黑树refs_by_desc中
 	rb_link_node(&new_ref->rb_node_desc, parent, p);
 	rb_insert_color(&new_ref->rb_node_desc, &proc->refs_by_desc);
+	// 将new_ref添加到它所引用的Binder实体对象node的Binder引用对象列表中
 	if (node) {
 		hlist_add_head(&new_ref->node_entry, &node->refs);
 		if (binder_debug_mask & BINDER_DEBUG_INTERNAL_REFS)
@@ -1767,9 +1779,11 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			goto err_dead_binder;
 		}
 		target_proc = target_thread->proc;
+	// 处理binder_transaction命令协议
 	} else {
 		if (tr->target.handle) {
 			struct binder_ref *ref;
+			// 获取引用对象
 			ref = binder_get_ref(proc, tr->target.handle);
 			if (ref == NULL) {
 				binder_user_error("binder: %d:%d got "
@@ -1778,8 +1792,11 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 				return_error = BR_FAILED_REPLY;
 				goto err_invalid_target_handle;
 			}
+			// 获取实体对象
 			target_node = ref->node;
+			// handle为0时
 		} else {
+			// 获得service manager实体对象
 			target_node = binder_context_mgr_node;
 			if (target_node == NULL) {
 				return_error = BR_DEAD_REPLY;
@@ -1787,11 +1804,19 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			}
 		}
 		e->to_node = target_node->debug_id;
+		// 找到target_proc
 		target_proc = target_node->proc;
+		// 找到后接下来要由目标进程空闲线程处理BR_TRANSACTION
+		// 空闲线程的类型:
+		// 1. 无事可做而空闲
+		// 2. 不是真的空闲，处于某个事务过程中，需要等待其它线程来处理另外一个事务
 		if (target_proc == NULL) {
 			return_error = BR_DEAD_REPLY;
 			goto err_dead_binder;
 		}
+		// 对空闲线程使用做的优化
+		// 尝试找到第二种类型的空闲线程来处理BR_TRANSACTION,以便提高目标进程target_proc的进程间通信并发能力
+		// 只有当同步时才能执行该优化方案
 		if (!(tr->flags & TF_ONE_WAY) && thread->transaction_stack) {
 			struct binder_transaction *tmp;
 			tmp = thread->transaction_stack;
@@ -1808,13 +1833,16 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			}
 			while (tmp) {
 				if (tmp->from && tmp->from->proc == target_proc)
+					// 找到处理的线程
 					target_thread = tmp->from;
 				tmp = tmp->from_parent;
 			}
 		}
 	}
 	if (target_thread) {
+		// 成功的找到了目标线程
 		e->to_thread = target_thread->pid;
+		// 指向target_thread的todo队列和wait等待队列
 		target_list = &target_thread->todo;
 		target_wait = &target_thread->wait;
 	} else {
@@ -1824,6 +1852,9 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 	e->to_proc = target_proc->pid;
 
 	/* TODO: reuse incoming transaction for reply */
+	// 分配了一个binder_transaction结构体t
+	// 封装成一个BINDER_WORK_TRANSACTION类型的工作项加入目标todo队列target_list
+	// 以便目标线程可以接受到BR_TRANSACTION返回协议
 	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (t == NULL) {
 		return_error = BR_FAILED_REPLY;
@@ -1831,6 +1862,7 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 	}
 	binder_stats.obj_created[BINDER_STAT_TRANSACTION]++;
 
+	// 分配了一个binder_work结构体tcomplete
 	tcomplete = kzalloc(sizeof(*tcomplete), GFP_KERNEL);
 	if (tcomplete == NULL) {
 		return_error = BR_FAILED_REPLY;
@@ -1858,7 +1890,12 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			       tr->data_size, tr->offsets_size);
 	}
 
+	// 初始化前面分配的binder_transaction结构体
 	if (!reply && !(tr->flags & TF_ONE_WAY))
+		// 如果函数正在处理一个BC_TRANSACTION命令协议，并且是所描述的一个同步进程间通信请求
+		// 将from指向源线程的thread
+		// 以便目标进程target_proc或者目标线程target_thread处理完该进程间通信请求之后，能够找回发出该进程间通信请求的线程
+		// 最终返回结果给它
 		t->from = thread;
 	else
 		t->from = NULL;
@@ -1879,16 +1916,19 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 	t->buffer->transaction = t;
 	t->buffer->target_node = target_node;
 	if (target_node)
+		// 增加目标Binder实体对象的强引用计数
 		binder_inc_node(target_node, 1, 0, NULL);
 
 	offp = (size_t *)(t->buffer->data + ALIGN(tr->data_size, sizeof(void *)));
 
+	// 将数据缓冲区发送拷贝到结构体t的内核缓冲区
 	if (copy_from_user(t->buffer->data, tr->data.ptr.buffer, tr->data_size)) {
 		binder_user_error("binder: %d:%d got transaction with invalid "
 			"data ptr\n", proc->pid, thread->pid);
 		return_error = BR_FAILED_REPLY;
 		goto err_copy_data_failed;
 	}
+	// 将偏移数组的内容拷贝到分配给binder_transaction结构体t的内核缓冲区
 	if (copy_from_user(offp, tr->data.ptr.offsets, tr->offsets_size)) {
 		binder_user_error("binder: %d:%d got transaction with invalid "
 			"offsets ptr\n", proc->pid, thread->pid);
@@ -1903,6 +1943,7 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 		goto err_bad_offset;
 	}
 	off_end = (void *)offp + tr->offsets_size;
+	// 依次处理进程间通信数据中的Binder对象
 	for (; offp < off_end; offp++) {
 		struct flat_binder_object *fp;
 		if (*offp > t->buffer->data_size - sizeof(*fp) ||
@@ -1921,11 +1962,13 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			struct binder_ref *ref;
 			struct binder_node *node = binder_get_node(proc, fp->binder);
 			if (node == NULL) {
+				// 创建一个Binder实体对象node
 				node = binder_new_node(proc, fp->binder, fp->cookie);
 				if (node == NULL) {
 					return_error = BR_FAILED_REPLY;
 					goto err_binder_new_node_failed;
 				}
+				// 根据从用户空间传递进程的flat_binder_object结构体内容来设置它的最小线程优先级以及是否接受文件描述符标志
 				node->min_priority = fp->flags & FLAT_BINDER_FLAG_PRIORITY_MASK;
 				node->accept_fds = !!(fp->flags & FLAT_BINDER_FLAG_ACCEPTS_FDS);
 			}
@@ -1937,16 +1980,20 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 					fp->cookie, node->cookie);
 				goto err_binder_get_ref_for_node_failed;
 			}
+			// 创建一个Binder引用对象
 			ref = binder_get_ref_for_node(target_proc, node);
 			if (ref == NULL) {
 				return_error = BR_FAILED_REPLY;
 				goto err_binder_get_ref_for_node_failed;
 			}
 			if (fp->type == BINDER_TYPE_BINDER)
+				// 修改结构体fp的类型
+				// 当驱动将进程间数据传递到目标进程时，进程间通信数据中的Binder实体对象就变成了Binder引用对象
 				fp->type = BINDER_TYPE_HANDLE;
 			else
 				fp->type = BINDER_TYPE_WEAK_HANDLE;
 			fp->handle = ref->desc;
+			// 增加引用对象ref的引用计数
 			binder_inc_ref(ref, fp->type == BINDER_TYPE_HANDLE, &thread->todo);
 			if (binder_debug_mask & BINDER_DEBUG_TRANSACTION)
 				printk(KERN_INFO "        node %d u%p -> ref %d desc %d\n",
@@ -2039,25 +2086,34 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 		BUG_ON(t->buffer->async_transaction != 0);
 		binder_pop_transaction(target_thread, in_reply_to);
 	} else if (!(t->flags & TF_ONE_WAY)) {
+		// 如果是正在处理一个同步的进程间通信请求
 		BUG_ON(t->buffer->async_transaction != 0);
+		// 需要回复
 		t->need_reply = 1;
+		// 压入到源线程thread的事务堆栈transaction_stack中
 		t->from_parent = thread->transaction_stack;
 		thread->transaction_stack = t;
 	} else {
 		BUG_ON(target_node == NULL);
 		BUG_ON(t->buffer->async_transaction != 1);
+		// 检查是否正在处理异步事务
 		if (target_node->has_async_transaction) {
+			// 添加到async_todo队列中进行处理
 			target_list = &target_node->async_todo;
 			target_wait = NULL;
 		} else
 			target_node->has_async_transaction = 1;
 	}
+	// 将binder_transaction结构体t封装成BINDER_WORK_TRANSACTION的工作项添加到目标进程target_proc中
 	t->work.type = BINDER_WORK_TRANSACTION;
 	list_add_tail(&t->work.entry, target_list);
+	// 将tcomplte封装成一个类型为BINDER_WORK_TRANSACTION_COMPLETE工作项添加到源线程thread的todo队列中
 	tcomplete->type = BINDER_WORK_TRANSACTION_COMPLETE;
 	list_add_tail(&tcomplete->entry, &thread->todo);
 	if (target_wait)
+		// 将target_proc或者target_thread唤醒，来处理这个重做向
 		wake_up_interruptible(target_wait);
+		// 执行到这里时，源线程thread,目标进程target_proc或者目标线程target_thread就会并发的去处理各自的todo队列的工作项了
 	return;
 
 err_get_unused_fd_failed:
@@ -2613,6 +2669,8 @@ binder_has_thread_work(struct binder_thread *thread)
 }
 
 // service manager睡眠在驱动的binder_thread_read中，等待其它进程service组件或者client组件发送进程间通信请求
+//
+// 当驱动将BINDER_WORK_TRANSACTION工作项添加到Service Manager进程的todo队列后，service manager会被唤醒，继续执行binder_thread_read
 static int
 binder_thread_read(struct binder_proc *proc, struct binder_thread *thread,
 	void  __user *buffer, int size, signed long *consumed, int non_block)
@@ -2721,10 +2779,13 @@ retry:
 
 		switch (w->type) {
 		case BINDER_WORK_TRANSACTION: {
+			// 转换成binder_transaction结构体
 			t = container_of(w, struct binder_transaction, work);
 		} break;
 		case BINDER_WORK_TRANSACTION_COMPLETE: {
 			cmd = BR_TRANSACTION_COMPLETE;
+			// 将一个BR_TRANSACTION_COMPLETE返回协议写入到用户空间提供的缓冲区中
+			// 向相应的进程发送一个BR_TRANSACTION_COMPLETE协议
 			if (put_user(cmd, (uint32_t __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(uint32_t);

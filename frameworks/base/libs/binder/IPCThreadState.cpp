@@ -670,6 +670,7 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
         if (err < NO_ERROR) break;
         if (mIn.dataAvail() == 0) continue;
         
+        // 此时驱动要发给当前进程的协议已经保存在mIn变量中了
         cmd = mIn.readInt32();
         
         IF_LOG_COMMANDS() {
@@ -679,6 +680,8 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
 
         switch (cmd) {
         case BR_TRANSACTION_COMPLETE:
+            // 跳出switch，重新进入循环
+            // 再次调用talkWithDriver来与Binder驱动交互
             if (!reply && !acquireResult) goto finish;
             break;
         
