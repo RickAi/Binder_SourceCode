@@ -9,6 +9,8 @@
 
 struct binder_state;
 
+// 描述一个Binder对象
+// 等同于结构体flat_binder_object
 struct binder_object
 {
     uint32_t type;
@@ -17,6 +19,8 @@ struct binder_object
     void *cookie;
 };
 
+// 用来描述进程间通信数据
+// 等同于binder_transaction_data
 struct binder_txn
 {
     void *target;
@@ -33,16 +37,26 @@ struct binder_txn
     void *offs;
 };
 
+// 用来解析进程间通信数据
+// 作用类似于Binder库中的Parcel类
 struct binder_io
 {
+    // 数据缓冲区
     char *data;            /* pointer to read/write from */
+    // 偏移数组
     uint32_t *offs;        /* array of offsets */
+    // 描述数据缓冲区data0,offs0还有多少内容还没有被解析
     uint32_t data_avail;   /* bytes available in data buffer */
     uint32_t offs_avail;   /* entries available in offsets array */
 
+    // 在解析进程间通信数据的过程中
+    // binder_io的成员变量data0, offs0是中指向数据缓冲区和偏移数组的起始地址
+    // 成员变量data和offs指向当前正在解析的数据缓冲区和偏移数组的状态
     char *data0;           /* start of data buffer */
     uint32_t *offs0;       /* start of offsets buffer */
+    // 描述数据缓冲区的属性
     uint32_t flags;
+    // 保留给以后使用
     uint32_t unused;
 };
 

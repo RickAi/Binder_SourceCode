@@ -79,9 +79,19 @@ const char *cmd_name(uint32_t cmd)
 #define binder_dump_txn(txn)  do{} while (0)
 #endif
 
+// 表示结构体binder_io内部的数据缓冲区是一块在内核空间分配的内核缓冲区
+// 可以通过用户空间地址来共享访问
+// 当使用完成这个数据缓冲区之后，它就可以使用BC_FREE_BUFFER命令协议来通知Binder驱动释放相应的内核缓冲区
 #define BIO_F_SHARED    0x01  /* needs to be buffer freed */
+// 表示两个错误码
+//
+// 表示数据溢出，上次读出的数据大小超出了其内部的数据缓冲区大小
 #define BIO_F_OVERFLOW  0x02  /* ran out of space */
+// 上次从结构体binder_io读数据时发生了IO错误
 #define BIO_F_IOERROR   0x04
+// binder_io内部的数据缓冲区是通过malloc来分配的
+// 它指的是一块在用户空间分配的缓冲区
+// 当进程完成这个数据缓冲区后，可以直接调用函数free释放
 #define BIO_F_MALLOCED  0x08  /* needs to be free()'d */
 
 // Service Manager打开了设备文件/dev/binder之后，就会得到文件描述符
@@ -171,11 +181,16 @@ int binder_write(struct binder_state *bs, void *data, unsigned len)
     return res;
 }
 
+// reply: binder_io结构体，内部包含了进程间通信结果数据
+// buffer_to_free：用户空间地址，指向了一块用来传输进程间通信数据的内核缓冲区
+// status: 用来描述servicemanager是否成功处理了一个进程间通信请求，即是否成功注册了service组件
 void binder_send_reply(struct binder_state *bs,
                        struct binder_io *reply,
                        void *buffer_to_free,
                        int status)
 {
+    // 匿名结构体
+    // 用来描述一个BC_FREE_BUFFER和一个BC_REPLY命令协议
     struct {
         uint32_t cmd_free;
         void *buffer;
@@ -183,6 +198,7 @@ void binder_send_reply(struct binder_state *bs,
         struct binder_txn txn;
     } __attribute__((packed)) data;
 
+    // 设置匿名结构体data中的BC_FREE_BUFFER命令协议内容
     data.cmd_free = BC_FREE_BUFFER;
     data.buffer = buffer_to_free;
     data.cmd_reply = BC_REPLY;
@@ -202,9 +218,11 @@ void binder_send_reply(struct binder_state *bs,
         data.txn.data = reply->data0;
         data.txn.offs = reply->offs0;
     }
+    // 将BC_FREE_BUFFER和BC_REPLY命令协议发送给Binder驱动程序
     binder_write(bs, &data, sizeof(data));
 }
 
+// 处理从驱动接收到的返回协议
 int binder_parse(struct binder_state *bs, struct binder_io *bio,
                  uint32_t *ptr, uint32_t size, binder_handler func)
 {
@@ -212,6 +230,7 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
     uint32_t *end = ptr + (size / 4);
 
     while (ptr < end) {
+        // 读出返回协议码
         uint32_t cmd = *ptr++;
 #if TRACE
         fprintf(stderr,"%s:\n", cmd_name(cmd));
@@ -231,6 +250,7 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
             ptr += 2;
             break;
         case BR_TRANSACTION: {
+            // 获取通信的数据
             struct binder_txn *txn = (void *) ptr;
             if ((end - ptr) * sizeof(uint32_t) < sizeof(struct binder_txn)) {
                 LOGE("parse: txn too small!\n");
@@ -239,13 +259,23 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
             binder_dump_txn(txn);
             if (func) {
                 unsigned rdata[256/4];
+                // 定义两个binder_io结构体
+                //
+                // 用来解析从Binder驱动程序读取回来的进程间通信数据
                 struct binder_io msg;
+                // 用来将进程间通信结果数据保存到缓冲区rdata中，以便后面可以将它返回给Binder驱动程序
                 struct binder_io reply;
                 int res;
 
+                // 分别使用函数bio_init, bio_init_from_txn来初始化
                 bio_init(&reply, rdata, sizeof(rdata), 4);
                 bio_init_from_txn(&msg, txn);
+                // 调用func来处理保存在binder_io结构体msg中的BR_TRANSACTION返回协议
+                // 将处理结果保存在binder_io结构体reply中
+                //
+                // func函数指针指向的是service manager进程中的函数svcmgr_handler
                 res = func(bs, txn, &msg, &reply);
+                // 将进程间的通信结果返回给Binder驱动
                 binder_send_reply(bs, &reply, txn->data, res);
             }
             ptr += sizeof(*txn) / sizeof(uint32_t);
@@ -414,20 +444,28 @@ void binder_loop(struct binder_state *bs, binder_handler func)
     }
 }
 
+// io: 要初始化的binder_io结构体
+// txn: 包含了binder_io结构体要解析的数据缓冲区和偏移数组
 void bio_init_from_txn(struct binder_io *bio, struct binder_txn *txn)
 {
     bio->data = bio->data0 = txn->data;
     bio->offs = bio->offs0 = txn->offs;
     bio->data_avail = txn->data_size;
     bio->offs_avail = txn->offs_size / 4;
+    // 设置flag, 表示内部的数据缓冲区和偏移数组是在内核空间分配的
     bio->flags = BIO_F_SHARED;
 }
 
+// bio: 要初始化的binder_io结构体
+// data: bio内部所用的缓冲区
+// maxdata: 用来描述缓冲区data的大小
+// maxoffs: 描述bio内部的偏移数组大小
 void bio_init(struct binder_io *bio, void *data,
               uint32_t maxdata, uint32_t maxoffs)
 {
     uint32_t n = maxoffs * sizeof(uint32_t);
 
+    // 判断是否大于缓冲区data的大小
     if (n > maxdata) {
         bio->flags = BIO_F_OVERFLOW;
         bio->data_avail = 0;
@@ -435,8 +473,13 @@ void bio_init(struct binder_io *bio, void *data,
         return;
     }
 
+    // 将data分成了两部分
+    //
+    // 一部分用于binder_io结构体bio的数据缓冲区
+    // 另一部分用户binder_io结构体的bio偏移数组
     bio->data = bio->data0 = data + n;
     bio->offs = bio->offs0 = data;
+    // 设置可用的数据缓冲区和偏移数组的大小
     bio->data_avail = maxdata - n;
     bio->offs_avail = maxoffs;
     bio->flags = 0;
@@ -579,15 +622,21 @@ void bio_put_string16_x(struct binder_io *bio, const char *_str)
 
 static void *bio_get(struct binder_io *bio, uint32_t size)
 {
+    // 将它对齐到4个字节边界
     size = (size + 3) & (~3);
 
+    // 剩余的为解析字节数data_avail是否小于要求读取的字节数size
     if (bio->data_avail < size){
         bio->data_avail = 0;
+        // 如果是，那么就是溢出了
         bio->flags |= BIO_F_OVERFLOW;
         return 0;
     }  else {
+        // 如果否，将data当前的位置保存在ptr中
         void *ptr = bio->data;
+        // 往前推进size个字节
         bio->data += size;
+        // 未读取的字节数减少size个字节
         bio->data_avail -= size;
         return ptr;
     }
@@ -614,6 +663,7 @@ static struct binder_object *_bio_get_obj(struct binder_io *bio)
     unsigned off = bio->data - bio->data0;
 
         /* TODO: be smarter about this? */
+    // 循环检查binder_io结构体的数据缓冲区当前位置是否保存了一个binder_object结构体
     for (n = 0; n < bio->offs_avail; n++) {
         if (bio->offs[n] == off)
             return bio_get(bio, sizeof(struct binder_object));
@@ -626,6 +676,7 @@ static struct binder_object *_bio_get_obj(struct binder_io *bio)
 
 void *bio_get_ref(struct binder_io *bio)
 {
+    // 从binder_io结构体取出一个binder_object结构体
     struct binder_object *obj;
 
     obj = _bio_get_obj(bio);
@@ -633,6 +684,8 @@ void *bio_get_ref(struct binder_io *bio)
         return 0;
 
     if (obj->type == BINDER_TYPE_HANDLE)
+        // 将成员变量pointer返回，pointer保存的是一个由Binder驱动程序创建的引用对象的句柄值
+        // 这个引用对象引用了即将要注册的Service组件
         return obj->pointer;
 
     return 0;

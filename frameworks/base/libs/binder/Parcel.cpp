@@ -1168,7 +1168,9 @@ size_t Parcel::ipcObjectsCount() const
 void Parcel::ipcSetDataReference(const uint8_t* data, size_t dataSize,
     const size_t* objects, size_t objectsCount, release_func relFunc, void* relCookie)
 {
+    // 释放当前Parcel对象内部的数据缓冲区所占用的内存
     freeDataNoInit();
+    // 重新初始化当前Parcel对象内部所使用的数据缓冲区
     mError = NO_ERROR;
     mData = const_cast<uint8_t*>(data);
     mDataSize = mDataCapacity = dataSize;

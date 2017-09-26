@@ -66,6 +66,8 @@ public:
 protected:
     virtual bool threadLoop()
     {
+        // 调用当前线程中的IPCThreadState对象函数joinThreadPool,将当前线程注册到Binder驱动程序中
+        // 成为一个Binder线程，以便Binder驱动程序可以分发进程间通信请求给它处理
         IPCThreadState::self()->joinThreadPool(mIsMain);
         return false;
     }
@@ -154,6 +156,7 @@ bool ProcessState::supportsProcesses() const
 void ProcessState::startThreadPool()
 {
     AutoMutex _l(mLock);
+    // 线程池只能启动一次
     if (!mThreadPoolStarted) {
         mThreadPoolStarted = true;
         spawnPooledThread(true);
@@ -323,6 +326,7 @@ void ProcessState::spawnPooledThread(bool isMain)
         char buf[32];
         sprintf(buf, "Binder Thread #%d", s);
         LOGV("Spawning new pooled thread, name=%s\n", buf);
+        // 创建了一个PoolThread并启动
         sp<Thread> t = new PoolThread(isMain);
         t->run(buf);
     }

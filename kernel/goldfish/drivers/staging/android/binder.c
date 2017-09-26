@@ -1637,6 +1637,7 @@ binder_dec_ref(struct binder_ref *ref, int strong)
 	return 0;
 }
 
+// 每一个线程正在处理的事务都应该位于它的事务堆栈的顶端，只有该事务处理完成之后，才可以把它删除
 static void
 binder_pop_transaction(
 	struct binder_thread *target_thread, struct binder_transaction *t)
@@ -1644,6 +1645,7 @@ binder_pop_transaction(
 	if (target_thread) {
 		BUG_ON(target_thread->transaction_stack != t);
 		BUG_ON(target_thread->transaction_stack->from != target_thread);
+		// 将目标线程target_thread的事务堆栈移到它的顶端
 		target_thread->transaction_stack =
 			target_thread->transaction_stack->from_parent;
 		t->from = NULL;
@@ -1651,6 +1653,7 @@ binder_pop_transaction(
 	t->need_reply = 0;
 	if (t->buffer)
 		t->buffer->transaction = NULL;
+	// 将t所占用的内存释放
 	kfree(t);
 	binder_stats.obj_deleted[BINDER_STAT_TRANSACTION]++;
 }
@@ -1737,6 +1740,8 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 	e->offsets_size = tr->offsets_size;
 
 	if (reply) {
+		// 找到之前请求与线程thread进行进程间通信的线程
+		// 取出binder_transaction结构体
 		in_reply_to = thread->transaction_stack;
 		if (in_reply_to == NULL) {
 			binder_user_error("binder: %d:%d got reply transaction "
@@ -1745,6 +1750,7 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			return_error = BR_FAILED_REPLY;
 			goto err_empty_call_stack;
 		}
+		// 恢复优先级
 		binder_set_nice(in_reply_to->saved_priority);
 		if (in_reply_to->to_thread != thread) {
 			binder_user_error("binder: %d:%d got reply transaction "
@@ -1760,6 +1766,7 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 			goto err_bad_call_stack;
 		}
 		thread->transaction_stack = in_reply_to->to_parent;
+		// 指向了之前请求与线程thread进行进程间通信的线程
 		target_thread = in_reply_to->from;
 		if (target_thread == NULL) {
 			return_error = BR_DEAD_REPLY;
@@ -2084,6 +2091,7 @@ binder_transaction(struct binder_proc *proc, struct binder_thread *thread,
 	}
 	if (reply) {
 		BUG_ON(t->buffer->async_transaction != 0);
+		// 从目标线程target_thread事务堆栈中删除binder_transaction结构体in_reply_to
 		binder_pop_transaction(target_thread, in_reply_to);
 	} else if (!(t->flags & TF_ONE_WAY)) {
 		// 如果是正在处理一个同步的进程间通信请求
@@ -2171,7 +2179,9 @@ binder_transaction_buffer_release(struct binder_proc *proc, struct binder_buffer
 			   proc->pid, buffer->debug_id,
 			   buffer->data_size, buffer->offsets_size, failed_at);
 
+	// 检查即将要释放的内核缓冲区buffer是否是分配给一个Binder实体对象使用的，即它的成员变量target_node的值是否不能与NULL
 	if (buffer->target_node)
+		// 减少引用计数
 		binder_dec_node(buffer->target_node, 1, 0);
 
 	offp = (size_t *)(buffer->data + ALIGN(buffer->data_size, sizeof(void *)));
@@ -2391,10 +2401,12 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 			void __user *data_ptr;
 			struct binder_buffer *buffer;
 
+			// 得到要释放的内核缓冲区的用户空间地址，保存在变量data_ptr中
 			if (get_user(data_ptr, (void * __user *)ptr))
 				return -EFAULT;
 			ptr += sizeof(void *);
 
+			// 找到与用户空间地址data_ptr对应的内核缓冲区buffer
 			buffer = binder_buffer_lookup(proc, data_ptr);
 			if (buffer == NULL) {
 				binder_user_error("binder: %d:%d "
@@ -2418,13 +2430,16 @@ binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 				buffer->transaction->buffer = NULL;
 				buffer->transaction = NULL;
 			}
+			// 是否分配给一个Binder实体对象用来处理异步事务
 			if (buffer->async_transaction && buffer->target_node) {
 				BUG_ON(!buffer->target_node->has_async_transaction);
+				// 检查内核缓冲区buffer的目标Binder实体对象target_node的异步事务队列async_todo是否为空
 				if (list_empty(&buffer->target_node->async_todo))
 					buffer->target_node->has_async_transaction = 0;
 				else
 					list_move_tail(buffer->target_node->async_todo.next, &thread->todo);
 			}
+			// 减少引用计数
 			binder_transaction_buffer_release(proc, buffer, NULL);
 			binder_free_buf(proc, buffer);
 			break;
@@ -2923,13 +2938,19 @@ retry:
 
 		BUG_ON(t->buffer == NULL);
 		if (t->buffer->target_node) {
+			// target_node引用了service manager的实体对象binder_context_mgr_node
 			struct binder_node *target_node = t->buffer->target_node;
+			// 将里面的目标函数拷贝到binder_transaction_data中
+			// 以便目标线程thread接收到Binder驱动程序给它发送的BR_TRANSACTION返回协议之后，可以将返回协议交给指定的Binder本地对象来处理
 			tr.target.ptr = target_node->ptr;
 			tr.cookie =  target_node->cookie;
 			t->saved_priority = task_nice(current);
+			// 保证目标线程的线程优先级不低于源线程的线程优先级
 			if (t->priority < target_node->min_priority &&
 			    !(t->flags & TF_ONE_WAY))
+			    // 设置优先级
 				binder_set_nice(t->priority);
+			// 如果是异步的就不用设置优先级，因为不需要等待
 			else if (!(t->flags & TF_ONE_WAY) ||
 				 t->saved_priority > target_node->min_priority)
 				binder_set_nice(target_node->min_priority);
@@ -2939,6 +2960,7 @@ retry:
 			tr.cookie = NULL;
 			cmd = BR_REPLY;
 		}
+		// 将binder_transaction结构体t中的进程间通信数据拷贝到binder_transaction_data结构体tr中
 		tr.code = t->code;
 		tr.flags = t->flags;
 		tr.sender_euid = t->sender_euid;
@@ -2950,14 +2972,26 @@ retry:
 			tr.sender_pid = 0;
 		}
 
+		// 将t中的数据缓冲区和偏移数组的内容拷贝到binder_transaction_data的结构体tr中
+		//
+		// Binder驱动为进程分配的内核缓冲区是用来传输进程间的通信数据的
+		// 将进程间通信数据从内核地址空间传输到用户地址空间
+		// 为了减少一次数据拷贝操作，Binder驱动程序分配给进程的内核缓冲区同时映射到了进程的内核地址空间和用户地址空间
+		//
+		// 以下并不是真正的拷贝，而是修改tr中数据缓冲区和偏移数组的地址值
+		// 使它们指向binder_transaction结构体t中的数据缓冲区和偏移数组
+		// 由于驱动为目标进程proc分配的内核缓冲区的内核空间地址和用户空间地址相差一个固定的值，并保存在user_buffer_offset中
+		// 因此，知道了binder_transaction结构体t中的数据缓冲区和偏移数组的内核空间地址之后，就很容易知道它们对应的用户空间地址了
 		tr.data_size = t->buffer->data_size;
 		tr.offsets_size = t->buffer->offsets_size;
 		tr.data.ptr.buffer = (void *)t->buffer->data + proc->user_buffer_offset;
 		tr.data.ptr.offsets = tr.data.ptr.buffer + ALIGN(t->buffer->data_size, sizeof(void *));
 
+		// 将它以及对应的返回协议拷贝到目标线程thread提供的用户空间缓冲区中
 		if (put_user(cmd, (uint32_t __user *)ptr))
 			return -EFAULT;
 		ptr += sizeof(uint32_t);
+		// 拷贝tr
 		if (copy_to_user(ptr, &tr, sizeof(tr)))
 			return -EFAULT;
 		ptr += sizeof(tr);
@@ -2973,13 +3007,21 @@ retry:
 			       t->buffer->data_size, t->buffer->offsets_size,
 			       tr.data.ptr.buffer, tr.data.ptr.offsets);
 
+		// 将binder_work结构体w从目标线程中或者目标进程的todo队列中删除
 		list_del(&t->work.entry);
+		// 驱动为它所分配的内核缓冲区允许目标线程thread在用户空间发出BC_FREE_BUFFER命令协议来释放
 		t->buffer->allow_user_free = 1;
+		// 如果是目标线程发送的BR_TRANSACTION返回协议并且是非ONE_WAY的请求
 		if (cmd == BR_TRANSACTION && !(t->flags & TF_ONE_WAY)) {
+			// 驱动正在请求目标线程thread执行一个同步的进程间通信请求
+			// 将binder_transaction压入到目标线程thread的事务堆栈transaction_stack中
+			// 以便驱动以后可以从目标线程thread所属进程的Binder线程池中选择一个最优的空闲Binder先测会给你来处理其它的进程间通信请求
 			t->to_parent = thread->transaction_stack;
 			t->to_thread = thread;
 			thread->transaction_stack = t;
 		} else {
+			// 如果不是一个同步的进程间通信请求
+			// 那么就会释放binder_transaction的空间
 			t->buffer->transaction = NULL;
 			kfree(t);
 			binder_stats.obj_deleted[BINDER_STAT_TRANSACTION]++;

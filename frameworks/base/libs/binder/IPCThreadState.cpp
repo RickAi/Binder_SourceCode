@@ -478,6 +478,7 @@ void IPCThreadState::joinThreadPool(bool isMain)
     LOG_THREADPOOL("**** THREAD %p (PID %d) IS LEAVING THE THREAD POOL err=%p\n",
         (void*)pthread_self(), getpid(), (void*)result);
     
+    // 退出线程池
     mOut.writeInt32(BC_EXIT_LOOPER);
     talkWithDriver(false);
 }
@@ -705,10 +706,12 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
         case BR_REPLY:
             {
                 binder_transaction_data tr;
+                // 读出协议代码
                 err = mIn.read(&tr, sizeof(tr));
                 LOG_ASSERT(err == NO_ERROR, "Not enough command data for brREPLY");
                 if (err != NO_ERROR) goto finish;
 
+                // 将保存在binder_transaction_data结构体tr中的进程间通信结果保存在Parcel对象的reply中
                 if (reply) {
                     if ((tr.flags & TF_STATUS_CODE) == 0) {
                         reply->ipcSetDataReference(

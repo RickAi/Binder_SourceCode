@@ -432,12 +432,14 @@ static void proxy_cleanup(const void* id, void* obj, void* cleanupCookie)
 
 static Mutex mProxyLock;
 
+// 要么指向binder代理对象，要么指向本地对象
 jobject javaObjectForIBinder(JNIEnv* env, const sp<IBinder>& val)
 {
     if (val == NULL) return NULL;
 
     if (val->checkSubclass(&gBinderOffsets)) {
         // One of our own!
+        // 如果是本地对象，将java层的Binder对象返回
         jobject object = static_cast<JavaBBinder*>(val.get())->object();
         //printf("objectForBinder %p: it's our own %p!\n", val.get(), object);
         return object;
