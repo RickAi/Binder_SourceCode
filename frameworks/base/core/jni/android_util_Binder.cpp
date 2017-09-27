@@ -229,6 +229,7 @@ static void set_dalvik_blockguard_policy(JNIEnv* env, jint strict_policy)
                               strict_policy);
 }
 
+// C++层对应的JavaBBinder对象
 class JavaBBinderHolder;
 
 class JavaBBinder : public BBinder
@@ -314,6 +315,7 @@ protected:
 
 private:
     JavaVM* const   mVM;
+    // 将参数object保存在自己的成员变量mObject中
     jobject const   mObject;
 };
 
@@ -641,6 +643,7 @@ static void android_os_Binder_init(JNIEnv* env, jobject clazz)
     }
     LOGV("Java Binder %p: acquiring first ref on holder %p", clazz, jbh);
     jbh->incStrong(clazz);
+    // 将jbh的地址保存在硬件访问服务FregService的父类Binder成员变量mObject中
     env->SetIntField(clazz, gBinderOffsets.mObject, (int)jbh);
 }
 

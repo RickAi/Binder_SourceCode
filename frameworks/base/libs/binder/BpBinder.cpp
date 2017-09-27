@@ -40,10 +40,12 @@ BpBinder::ObjectManager::~ObjectManager()
     kill();
 }
 
+// 增加外部对象
 void BpBinder::ObjectManager::attach(
     const void* objectID, void* object, void* cleanupCookie,
     IBinder::object_cleanup_func func)
 {
+    // 创建entry_t结构体
     entry_t e;
     e.object = object;
     e.cleanupCookie = cleanupCookie;
@@ -55,11 +57,13 @@ void BpBinder::ObjectManager::attach(
         return;
     }
 
+    // 用来标志entry_t
     mObjects.add(objectID, e);
 }
 
 void* BpBinder::ObjectManager::find(const void* objectID) const
 {
+    // 获取一个Object
     const ssize_t i = mObjects.indexOfKey(objectID);
     if (i < 0) return NULL;
     return mObjects.valueAt(i).object;
@@ -77,6 +81,7 @@ void BpBinder::ObjectManager::kill()
     for (size_t i=0; i<N; i++) {
         const entry_t& e = mObjects.valueAt(i);
         if (e.func != NULL) {
+            // 爱哦用它的成员变量func指向的函数进行清理
             e.func(mObjects.keyAt(i), e.object, e.cleanupCookie);
         }
     }

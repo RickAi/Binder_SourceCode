@@ -89,8 +89,11 @@ public:
 
         struct entry_t
         {
+            // 指向一个外部对象的弱引用对象
             void* object;
+            // 函数指针，用来清理成员变量object所指向的外部对象
             void* cleanupCookie;
+            // 清理函数的一个调用参数
             IBinder::object_cleanup_func func;
         };
 
@@ -123,6 +126,7 @@ private:
             volatile int32_t    mAlive;
             volatile int32_t    mObitsSent;
             Vector<Obituary>*   mObituaries;
+            // 用来管理与该Binder代理对象关联的外部对象
             ObjectManager       mObjects;
             Parcel*             mConstantData;
     mutable String16            mDescriptorCache;

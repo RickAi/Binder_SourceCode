@@ -138,6 +138,7 @@ public:
     {
         unsigned n;
         for (n = 0; n < 5; n++){
+            // 尝试5次来获得代理对象
             sp<IBinder> svc = checkService(name);
             if (svc != NULL) return svc;
             LOGI("Waiting for service %s...\n", String8(name).string());

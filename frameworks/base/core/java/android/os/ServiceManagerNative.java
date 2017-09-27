@@ -28,6 +28,7 @@ public abstract class ServiceManagerNative extends Binder implements IServiceMan
      * Cast a Binder object into a service manager interface, generating
      * a proxy if needed.
      */
+    // obj: 指向一个Java服务代理对象，即BinderProxy对象
     static public IServiceManager asInterface(IBinder obj)
     {
         if (obj == null) {
@@ -39,6 +40,7 @@ public abstract class ServiceManagerNative extends Binder implements IServiceMan
             return in;
         }
         
+        // 创建一个ServiceManagerProxy对象
         return new ServiceManagerProxy(obj);
     }
     
